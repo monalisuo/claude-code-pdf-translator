@@ -1,0 +1,3 @@
+interface:
+  display_name: "MinerU PDF VS Code"
+  short_description: "Translate PDFs with MinerU, an OpenAI-compatible LLM, and Claude Code/VS Code workflows."

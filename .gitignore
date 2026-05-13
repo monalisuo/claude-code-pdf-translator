@@ -1,0 +1,24 @@
+# 凭据文件 - 切勿提交
+.env
+mineru密钥.txt
+翻译大模型url以及key.txt
+
+# 输出目录
+translated/
+.pdf_translate_tmp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db

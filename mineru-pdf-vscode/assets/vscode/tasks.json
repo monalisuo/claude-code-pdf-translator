@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Check MinerU PDF translation setup",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "${input:skillScript}",
+        "--workdir",
+        "${workspaceFolder}",
+        "--check"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Translate PDFs with MinerU",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "${input:skillScript}",
+        "--workdir",
+        "${workspaceFolder}"
+      ],
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "skillScript",
+      "type": "promptString",
+      "description": "Path to mineru-pdf-vscode/scripts/pdf_translate.py",
+      "default": "${workspaceFolder}/.claude/skills/mineru-pdf-vscode/scripts/pdf_translate.py"
+    }
+  ]
+}
