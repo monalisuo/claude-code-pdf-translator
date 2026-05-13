@@ -1,0 +1,7 @@
+interface:
+  display_name: "MinerU PDF VS Code (DeepSeek V4 Pro)"
+  short_description: "Translate PDFs with MinerU and DeepSeek V4 Pro, using Claude Code/VS Code workflows."
+  llm_provider: "DeepSeek"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+  compatibility: "OpenAI-compatible chat completions"

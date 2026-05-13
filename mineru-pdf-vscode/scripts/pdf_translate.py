@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+SKILL_DIR = Path(__file__).resolve().parent.parent
+
 MINERU_CREATE_TASK_URL = "https://mineru.net/api/v4/extract/task"
 MINERU_TASK_URL_TEMPLATE = "https://mineru.net/api/v4/extract/task/{task_id}"
 DEFAULT_UPLOAD_API_URL = "https://tmpfiles.org/api/v1/upload"
@@ -89,15 +91,22 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 def env_value(workdir: Path, name: str) -> str | None:
     env_file_values = read_env_file(workdir / ".env")
-    return os.environ.get(name) or env_file_values.get(name)
+    skill_env_values = read_env_file(SKILL_DIR / ".env")
+    return os.environ.get(name) or env_file_values.get(name) or skill_env_values.get(name)
 
 
 def load_mineru_token(workdir: Path, override: str | None) -> str:
-    token = override or read_text_if_exists(workdir / "mineru密钥.txt") or env_value(workdir, "MINERU_API_TOKEN")
+    token = (
+        override
+        or read_text_if_exists(workdir / "mineru密钥.txt")
+        or read_text_if_exists(SKILL_DIR / "mineru密钥.txt")
+        or env_value(workdir, "MINERU_API_TOKEN")
+    )
     if not token:
         raise PipelineError(
-            "MinerU token not found. Set MINERU_API_TOKEN, create .env, "
-            "or create mineru密钥.txt in the PDF working directory."
+            "MinerU token not found. Set MINERU_API_TOKEN, create .env "
+            "in the PDF working directory or skill directory, "
+            "or create mineru密钥.txt in the working or skill directory."
         )
     return token
 
@@ -105,13 +114,14 @@ def load_mineru_token(workdir: Path, override: str | None) -> str:
 def load_llm_config(workdir: Path, base_url: str | None, api_key: str | None, model: str | None) -> LlmConfig:
     file_base_url = None
     file_api_key = None
-    local_file = workdir / "翻译大模型url以及key.txt"
-    local_text = read_text_if_exists(local_file)
-    if local_text:
-        lines = [line.strip() for line in local_text.splitlines() if line.strip()]
-        if len(lines) >= 2:
-            file_base_url = lines[0]
-            file_api_key = lines[1]
+    for config_file in (workdir / "翻译大模型url以及key.txt", SKILL_DIR / "翻译大模型url以及key.txt"):
+        local_text = read_text_if_exists(config_file)
+        if local_text:
+            lines = [line.strip() for line in local_text.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                file_base_url = lines[0]
+                file_api_key = lines[1]
+                break
 
     final_base_url = (base_url or file_base_url or env_value(workdir, "PDF_TRANSLATE_LLM_BASE_URL") or "").rstrip("/")
     final_api_key = api_key or file_api_key or env_value(workdir, "PDF_TRANSLATE_LLM_API_KEY") or ""
@@ -120,7 +130,8 @@ def load_llm_config(workdir: Path, base_url: str | None, api_key: str | None, mo
     if not final_base_url or not final_api_key:
         raise PipelineError(
             "LLM config not found. Set PDF_TRANSLATE_LLM_BASE_URL and PDF_TRANSLATE_LLM_API_KEY, "
-            "create .env, or create 翻译大模型url以及key.txt with base URL on line 1 and API key on line 2."
+            "create .env in the PDF working directory or skill directory, "
+            "or create 翻译大模型url以及key.txt in the working or skill directory."
         )
     return LlmConfig(base_url=final_base_url, api_key=final_api_key, model=final_model)
 
@@ -586,16 +597,17 @@ def resolve_child_path(workdir: Path, raw_path: str) -> Path:
 def run_check(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir).expanduser().resolve()
     log(f"workdir: {workdir}")
+    log(f"skill dir: {SKILL_DIR}")
     log(f"pdf files: {len(list(iter_input_pdfs(workdir, args.target_suffix))) if workdir.exists() else 0}")
     for label, ok in [
-        ("mineru token", bool(args.mineru_token or read_text_if_exists(workdir / "mineru密钥.txt") or env_value(workdir, "MINERU_API_TOKEN"))),
+        ("mineru token", bool(args.mineru_token or read_text_if_exists(workdir / "mineru密钥.txt") or read_text_if_exists(SKILL_DIR / "mineru密钥.txt") or env_value(workdir, "MINERU_API_TOKEN"))),
         ("llm base url", bool(args.llm_base_url or env_value(workdir, "PDF_TRANSLATE_LLM_BASE_URL"))),
         ("llm api key", bool(args.llm_api_key or env_value(workdir, "PDF_TRANSLATE_LLM_API_KEY"))),
     ]:
         log(f"{label}: {'ok' if ok else 'missing'}")
-    local_two_line = workdir / "翻译大模型url以及key.txt"
-    if local_two_line.exists():
-        log("two-line llm config file: present")
+    for local_two_line in (workdir / "翻译大模型url以及key.txt", SKILL_DIR / "翻译大模型url以及key.txt"):
+        if local_two_line.exists():
+            log(f"two-line llm config file: {local_two_line}")
     try:
         browser = detect_browser(args.browser_path, workdir)
         log(f"browser: {browser}")
