@@ -1,65 +1,95 @@
-# Troubleshooting
+# 故障排查
 
-## `--check` says browser is missing
+## `--check` 报告浏览器缺失
 
-Install Microsoft Edge, Google Chrome, or Chromium. Then rerun:
+安装 Microsoft Edge、Google Chrome 或 Chromium，然后重新运行：
 
 ```bash
 python scripts/pdf_translate.py --workdir . --check
 ```
 
-If the browser is installed but not detected, set:
+如果浏览器已安装但未被检测到，手动设置：
 
 ```bash
 PDF_TRANSLATE_BROWSER="/absolute/path/to/browser"
 ```
 
-or pass:
+或通过命令行参数：
 
 ```bash
 --browser-path "/absolute/path/to/browser"
 ```
 
-## MinerU upload or parsing fails
+Windows 上常见路径：
+- `C:\Program Files\Microsoft\Edge\Application\msedge.exe`
+- `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
+- `C:\Program Files\Google\Chrome\Application\chrome.exe`
 
-Check these in order:
+## MinerU 上传或解析失败
 
-1. The source PDF is not password-protected.
-2. The temporary upload service returns a public URL that MinerU can fetch.
-3. `MINERU_API_TOKEN` or `mineru密钥.txt` contains the active MinerU token.
-4. Very large PDFs may need to be split before translation.
-5. For scanned documents, rerun with `--ocr`.
+按以下顺序排查：
 
-## LLM request fails
+1. 源 PDF 是否被密码保护。
+2. 临时上传服务是否返回 MinerU 可拉取的公开 URL。
+3. `MINERU_API_TOKEN` 或 `mineru密钥.txt` 是否包含有效的 MinerU token。检查是否已在技能目录（`~/.claude/skills/mineru-pdf-vscode/`）下配置。
+4. 大型 PDF 可能需要在翻译前先拆分。
+5. 扫描件请使用 `--ocr` 重新运行。
 
-Check these in order:
+## LLM 请求失败
 
-1. `PDF_TRANSLATE_LLM_BASE_URL` should usually be the provider root, not the full chat completions path. The script appends `/v1/chat/completions`.
-2. The model named by `PDF_TRANSLATE_MODEL` or `--llm-model` must support OpenAI-compatible chat completions.
-3. The API key must have enough quota for long document translation.
-4. Reduce chunk size if a provider has a smaller context window:
+按以下顺序排查：
+
+1. `PDF_TRANSLATE_LLM_BASE_URL` 应为服务商根路径，不要包含 `/v1` 后缀。脚本会自动拼接 `/v1/chat/completions`。
+   - DeepSeek：`https://api.deepseek.com`
+   - OpenAI：`https://api.openai.com`
+   - Ollama：`http://localhost:11434`
+2. `PDF_TRANSLATE_MODEL` 或 `--llm-model` 指定的模型必须支持 OpenAI 兼容的 chat completions。
+   - DeepSeek：`deepseek-chat`
+   - OpenAI：`gpt-4o-mini`、`gpt-4o` 等
+3. API key 配额是否充足，长文档翻译消耗较大。
+4. 如果服务商上下文窗口较小，可减小分块大小：
    ```bash
    python scripts/pdf_translate.py --workdir . --max-chars 6000
    ```
+5. 确认凭据配置正确。可运行 `--check` 验证：
+   ```bash
+   python scripts/pdf_translate.py --workdir . --check
+   ```
 
-## Images missing in final PDF
+## 凭据未被找到
 
-Run with:
+脚本按以下顺序查找凭据：
+1. 命令行参数（`--mineru-token`、`--llm-base-url`、`--llm-api-key`）
+2. PDF 工作目录下的 `mineru密钥.txt` 和 `翻译大模型url以及key.txt`
+3. 技能目录下的同名文件
+4. PDF 工作目录下的 `.env`
+5. 技能目录（`~/.claude/skills/mineru-pdf-vscode/`）下的 `.env`
+6. 系统环境变量
+
+推荐将凭据放在技能目录下的 `.env` 中，一次配置永久生效。
+
+## 最终 PDF 中图片缺失
+
+使用以下命令重新运行：
 
 ```bash
 python scripts/pdf_translate.py --workdir . --keep-temp --keep-markdown --force
 ```
 
-Inspect the MinerU extraction folder under `.pdf_translate_tmp/<pdf-name>/mineru/` and verify that Markdown image paths point to existing files. If MinerU changed the output layout, update image paths in the translated Markdown before rendering.
+检查 MinerU 提取目录（`.pdf_translate_tmp/<pdf名称>/mineru/`），确认 Markdown 中的图片路径指向存在的文件。如果 MinerU 输出布局发生变化，在渲染前更新译文 Markdown 中的图片路径。
 
-## Formulas render poorly
+## 公式渲染异常
 
-The HTML renderer loads MathJax from jsDelivr. If the machine cannot access the CDN, formulas may not render before print. Use a network that can reach the CDN or customize the HTML template in `scripts/pdf_translate.py` to point to a local MathJax bundle.
+HTML 渲染器从 jsDelivr 加载 MathJax。如果机器无法访问 CDN，公式可能在打印前无法渲染。请使用可访问 CDN 的网络环境，或修改 `scripts/pdf_translate.py` 中的 HTML 模板，将 MathJax 指向本地文件。
 
-## Final PDF is skipped
+## 最终 PDF 被跳过
 
-The script skips outputs that already exist. Add `--force` to rebuild.
+脚本默认跳过已存在的输出文件。添加 `--force` 强制重新生成：
 
-## `failures.json` exists
+```bash
+python scripts/pdf_translate.py --workdir . --force
+```
 
-Open `translated/failures.json`, identify per-file errors, fix the root cause, then rerun with `--force` for only the affected files after moving unrelated PDFs out of the top-level workdir or translating them in a separate folder.
+## `failures.json` 存在
+
+打开 `translated/failures.json`，逐一确认文件错误信息，修复根本原因后，将无关 PDF 移出顶层工作目录或在单独文件夹中翻译受影响的文件，然后使用 `--force` 重新运行。

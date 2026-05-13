@@ -1,67 +1,87 @@
-# Installation and VS Code setup
+# 安装与 VS Code 设置
 
-## Install as a Claude Code project skill
+## 安装为 Claude Code 项目技能
 
-From the repository root or VS Code workspace folder:
+在仓库根目录或 VS Code 工作区目录：
 
 ```bash
 mkdir -p .claude/skills/mineru-pdf-vscode
-# copy this skill folder's contents into .claude/skills/mineru-pdf-vscode
+# 将本技能文件夹内容复制到 .claude/skills/mineru-pdf-vscode
 ```
 
-Restart Claude Code if the top-level `.claude/skills` folder did not exist when the session started. If Claude Code is already watching that folder, edits are usually picked up live.
+如果会话启动时 `.claude/skills` 目录尚不存在，重启 Claude Code 即可。如果 Claude Code 已在监听该目录，修改通常会被实时获取。
 
-## Install as a personal skill
+## 安装为个人技能（所有项目可用）
 
-macOS/Linux:
+macOS / Linux：
 
 ```bash
 mkdir -p ~/.claude/skills/mineru-pdf-vscode
-# copy this skill folder's contents into ~/.claude/skills/mineru-pdf-vscode
+# 将本技能文件夹内容复制到 ~/.claude/skills/mineru-pdf-vscode
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.claude\skills\mineru-pdf-vscode"
-# copy this skill folder's contents into $HOME\.claude\skills\mineru-pdf-vscode
+# 将本技能文件夹内容复制到 $HOME\.claude\skills\mineru-pdf-vscode
 ```
 
-## Use from VS Code
+## 从 VS Code 使用
 
-1. Open the PDF folder or parent project in VS Code.
-2. Start Claude Code in that workspace.
-3. Ask Claude Code to translate PDFs in the folder, or invoke the skill directly if your Claude Code version supports slash invocation:
+1. 在 VS Code 中打开 PDF 所在文件夹或父项目。
+2. 在该工作区启动 Claude Code。
+3. 让 Claude Code 翻译文件夹中的 PDF，如果 Claude Code 版本支持斜杠命令，可直接调用技能：
    ```text
-   /mineru-pdf-vscode translate the PDFs in ./papers
+   /mineru-pdf-vscode 翻译 ./papers 中的 PDF
    ```
-4. The script writes final PDFs to `translated/` by default.
+4. 脚本默认将最终 PDF 输出到 `translated/` 目录。
 
-## Optional VS Code task
+## 推荐：技能目录凭据配置
 
-Copy `assets/vscode/tasks.json` into `.vscode/tasks.json` in your project, then run **Tasks: Run Task** → **Translate PDFs with MinerU**.
+安装完成后，在技能目录创建 `.env` 一次配置凭据，之后所有项目自动生效，无需重复配置：
 
-If the task cannot find the script, set an environment variable pointing to the installed skill script:
+```bash
+cp ~/.claude/skills/mineru-pdf-vscode/assets/env.example ~/.claude/skills/mineru-pdf-vscode/.env
+# 编辑 .env 填入真实凭据
+```
 
-macOS/Linux:
+```ini
+# ~/.claude/skills/mineru-pdf-vscode/.env
+MINERU_API_TOKEN=你的MinerU_token
+PDF_TRANSLATE_LLM_BASE_URL=https://api.deepseek.com
+PDF_TRANSLATE_LLM_API_KEY=你的DeepSeek_API_Key
+PDF_TRANSLATE_MODEL=deepseek-chat
+```
+
+凭据加载顺序：命令行参数 → PDF 目录文件 → 技能目录文件 → PDF 目录 `.env` → 技能目录 `.env` → 环境变量。
+
+## 可选 VS Code 任务
+
+将 `assets/vscode/tasks.json` 复制到项目的 `.vscode/tasks.json` 中，然后运行 **任务：运行任务** → **Translate PDFs with MinerU**。
+
+如果任务找不到脚本，设置环境变量指向已安装的技能脚本：
+
+macOS / Linux：
 
 ```bash
 export MINERU_PDF_SKILL_SCRIPT="$HOME/.claude/skills/mineru-pdf-vscode/scripts/pdf_translate.py"
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 $env:MINERU_PDF_SKILL_SCRIPT="$HOME\.claude\skills\mineru-pdf-vscode\scripts\pdf_translate.py"
 ```
 
-## Credential files
+## 凭据文件说明
 
-Place either these local files in the PDF workdir:
+以下文件可放在 PDF 工作目录或技能目录中，用于覆盖默认凭据：
 
 ```text
-mineru密钥.txt
-翻译大模型url以及key.txt
+mineru密钥.txt                   # 单行 MinerU API token
+翻译大模型url以及key.txt           # 第一行 LLM base URL，第二行 API key
+.env                             # 键值配置（参考 assets/env.example）
 ```
 
-or create `.env` from `assets/env.example`. Keep all of these files out of git.
+请将所有凭据文件加入 `.gitignore`，切勿提交包含真实密钥的文件。

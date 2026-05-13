@@ -9,7 +9,7 @@
 - **Python 3.8+**（仅需标准库，`markdown` 包会自动安装）
 - **Edge / Chrome / Chromium** 浏览器（用于渲染最终 PDF，脚本会自动检测）
 - **MinerU API token**（[mineru.net](https://mineru.net) 注册获取）
-- **OpenAI 兼容 LLM API**（OpenAI、Ollama、vLLM 等任何兼容 `/v1/chat/completions` 的服务）
+- **OpenAI 兼容 LLM API**（DeepSeek、OpenAI、Ollama、vLLM 等任何兼容 `/v1/chat/completions` 的服务）
 
 ## 安装为 Claude Code 技能
 
@@ -34,27 +34,43 @@ Copy-Item -Recurse mineru-pdf-vscode\* "$HOME\.claude\skills\mineru-pdf-vscode\"
 
 ## 快速开始
 
-### 1. 配置凭据
+### 1. 配置凭据（推荐：一次配置，永久生效）
 
-在 PDF 所在目录创建配置文件：
+**方式一：技能目录 `.env`（推荐）**
 
-**方式一：环境变量**
+在技能目录下创建 `.env` 文件（参考 `assets/env.example`），之后所有项目自动生效：
+
+```bash
+# 复制模板
+cp ~/.claude/skills/mineru-pdf-vscode/assets/env.example ~/.claude/skills/mineru-pdf-vscode/.env
+# 编辑填入凭据
+```
+
+```ini
+# ~/.claude/skills/mineru-pdf-vscode/.env
+MINERU_API_TOKEN=你的MinerU_token
+PDF_TRANSLATE_LLM_BASE_URL=https://api.deepseek.com
+PDF_TRANSLATE_LLM_API_KEY=你的API_key
+PDF_TRANSLATE_MODEL=deepseek-chat
+```
+
+**方式二：环境变量**
 
 ```bash
 export MINERU_API_TOKEN="你的token"
-export PDF_TRANSLATE_LLM_BASE_URL="https://api.openai.com"
+export PDF_TRANSLATE_LLM_BASE_URL="https://api.deepseek.com"
 export PDF_TRANSLATE_LLM_API_KEY="你的key"
-export PDF_TRANSLATE_MODEL="gpt-4o-mini"
+export PDF_TRANSLATE_MODEL="deepseek-chat"
 ```
 
-**方式二：本地文件**
+**方式三：PDF 目录本地文件**
 
 在 PDF 目录下创建两个文件：
 
 - `mineru密钥.txt`：写入 MinerU token
 - `翻译大模型url以及key.txt`：第一行 LLM base URL，第二行 API key
 
-**方式三：.env 文件**（参考 `assets/env.example`）
+> **凭据加载顺序**：命令行参数 → PDF 目录文件 → 技能目录文件 → PDF 目录 `.env` → 技能目录 `.env` → 环境变量
 
 ### 2. 检查环境
 
@@ -112,7 +128,8 @@ mineru-pdf-vscode/
 │   └── vscode/
 │       └── tasks.json              # VS Code 任务配置
 └── agents/
-    └── openai.yaml                 # Agent 接口定义
+    ├── openai.yaml                 # OpenAI agent 接口
+    └── deepseek.yaml               # DeepSeek V4 Pro agent 接口
 ```
 
 ## 故障排查

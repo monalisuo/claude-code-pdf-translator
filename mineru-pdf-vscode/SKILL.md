@@ -1,82 +1,101 @@
 ---
 name: mineru-pdf-vscode
-description: translate local pdf papers and technical documents in vs code or claude code by using mineru online extraction, an openai-compatible llm, and headless edge/chrome/chromium rendering. use when the user asks to batch translate pdfs, produce final translated pdf files, configure mineru/llm credentials, troubleshoot the translation pipeline, or set up a claude code skill for pdf translation.
+description: 使用 MinerU 在线提取、OpenAI 兼容大模型（DeepSeek、OpenAI 等）和无头 Edge/Chrome/Chromium 浏览器，在 VS Code 或 Claude Code 中批量翻译本地 PDF 论文和技术文档。当用户需要批量翻译 PDF、生成翻译后的 PDF 文件、配置 MinerU/LLM 凭据、排查翻译流程问题，或设置 Claude Code PDF 翻译技能时使用。
 ---
 
-# MinerU PDF translation for VS Code + Claude Code
+# MinerU PDF 翻译 — VS Code + Claude Code 技能
 
-Use this skill to help the user translate local PDF papers or technical documents into final translated PDFs while preserving structure, images, tables, formulas, and Markdown-derived layout as much as possible.
+使用此技能帮助用户将本地 PDF 论文或技术文档翻译为排版完整的译文 PDF，尽可能保留原文结构、图片、表格、公式和 Markdown 排版。
 
-The bundled implementation is `scripts/pdf_translate.py`. It sends source PDFs to an upload endpoint, MinerU, and the configured LLM provider, then renders final PDFs locally with Edge/Chrome/Chromium. Treat this as an external-data workflow: before running on sensitive PDFs, make sure the user understands the documents leave the local machine.
+核心实现为 `scripts/pdf_translate.py`。它将源 PDF 发送至上传服务、MinerU 和所配置的 LLM，然后使用 Edge/Chrome/Chromium 无头浏览器在本地渲染最终 PDF。这是外部数据处理流程：处理敏感 PDF 前，请确保用户了解文档会离开本地机器。
 
-## Standard workflow
+## 标准流程
 
-1. Identify the working folder that contains the source PDFs. Prefer the current VS Code workspace or the folder named by the user.
-2. Check prerequisites before translating:
+1. 确定包含源 PDF 的工作目录。优先使用当前 VS Code 工作区或用户指定的目录。
+2. 翻译前检查环境：
    ```bash
-   python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir <pdf-folder> --check
+   python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir <PDF目录> --check
    ```
-3. Configure credentials without exposing secrets in chat. Prefer local files in the PDF folder or environment variables.
-4. Run the translator from Claude Code:
+3. 配置凭据。推荐将凭据放在技能目录下，一次配置永久生效，避免在对话中暴露密钥。
+4. 从 Claude Code 运行翻译：
    ```bash
-   python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir <pdf-folder>
+   python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir <PDF目录>
    ```
-5. Review `translated/`. If `translated/failures.json` exists, read it and explain the failed PDFs and next fix.
-6. Return the final output paths and a short operational summary. Do not paste API keys, tokens, or full extracted document text.
+5. 检查 `translated/` 输出目录。如果存在 `translated/failures.json`，读取并解释失败原因和修复方案。
+6. 返回最终输出路径和简要操作摘要。禁止粘贴 API 密钥、token 或提取的文档全文。
 
-## Configuration
+## 配置
 
-The script reads config in this order: command-line flags, local config files in `--workdir`, then environment variables / `.env`.
+脚本按以下顺序读取配置：命令行参数 → PDF 目录本地文件 → 技能目录本地文件 → PDF 目录 `.env` → 技能目录 `.env` → 环境变量。
 
-Local config files in the PDF folder:
+### 技能目录配置（推荐，一次配置永久生效）
 
-- `mineru密钥.txt`: MinerU API token.
-- `翻译大模型url以及key.txt`: line 1 is the OpenAI-compatible base URL, line 2 is the API key.
-- `.env`: optional key/value config; see `assets/env.example`.
+在技能目录下放置 `.env` 文件：
 
-Environment variables:
+```bash
+# ~/.claude/skills/mineru-pdf-vscode/.env
+MINERU_API_TOKEN="..."
+PDF_TRANSLATE_LLM_BASE_URL="https://api.deepseek.com"
+PDF_TRANSLATE_LLM_API_KEY="..."
+PDF_TRANSLATE_MODEL="deepseek-chat"
+```
+
+也可在技能目录放置：
+
+- `mineru密钥.txt`：MinerU API token。
+- `翻译大模型url以及key.txt`：第一行为 OpenAI 兼容 base URL，第二行为 API key。
+
+### PDF 目录本地配置
+
+适合项目级覆盖：
+
+- `mineru密钥.txt`：MinerU API token。
+- `翻译大模型url以及key.txt`：第一行为 OpenAI 兼容 base URL，第二行为 API key。
+- `.env`：键值配置，参考 `assets/env.example`。
+
+### 环境变量
 
 ```bash
 MINERU_API_TOKEN="..."
-PDF_TRANSLATE_LLM_BASE_URL="https://your-provider.example"
+PDF_TRANSLATE_LLM_BASE_URL="https://api.deepseek.com"
 PDF_TRANSLATE_LLM_API_KEY="..."
-PDF_TRANSLATE_MODEL="gpt-4o-mini"
+PDF_TRANSLATE_MODEL="deepseek-chat"
 PDF_TRANSLATE_BROWSER="/path/to/chrome-or-edge"
 ```
 
-## Common commands
+## 常用命令
 
-Translate all top-level PDFs in the current folder to Simplified Chinese:
+翻译当前目录下所有顶层 PDF 为简体中文：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir .
 ```
 
-Force regeneration of existing outputs:
+强制重新生成已有输出：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --force
 ```
 
-Translate into another language and use a custom suffix:
+翻译为其他语言并自定义后缀：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --target-language "Japanese" --target-suffix ja
 ```
 
-Keep translated Markdown for inspection:
+保留翻译后的 Markdown 用于检查：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --keep-markdown
 ```
 
-Use OCR mode for scanned PDFs:
+OCR 模式处理扫描件：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --ocr
 ```
 
-Use explicit credentials only when the user requests it. Avoid echoing secrets in terminal output:
+仅在用户明确要求时使用命令行传递凭据，避免在终端输出中回显密钥：
 
 ```bash
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" \
@@ -87,30 +106,39 @@ python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" \
   --llm-model "$PDF_TRANSLATE_MODEL"
 ```
 
-## VS Code setup guidance
+## VS Code 设置指南
 
-For project-level use, install the skill at:
+项目级安装：
 
 ```text
 <project>/.claude/skills/mineru-pdf-vscode/
 ```
 
-For personal use across projects, install at:
+跨项目个人安装：
 
 ```text
 ~/.claude/skills/mineru-pdf-vscode/
 ```
 
-If the user wants a VS Code task, copy `assets/vscode/tasks.json` into the project `.vscode/tasks.json` and adjust `MINERU_PDF_SKILL_SCRIPT` or the prompted script path.
+如需 VS Code 任务，将 `assets/vscode/tasks.json` 复制到项目 `.vscode/tasks.json` 并调整 `MINERU_PDF_SKILL_SCRIPT` 或脚本路径。
 
-For complete setup and install options, read `references/installation.md`.
+完整安装选项见 `references/installation.md`。
 
-## Troubleshooting rules
+## 支持的大模型
 
-- If `--check` reports a missing browser, help the user install Edge/Chrome/Chromium or set `PDF_TRANSLATE_BROWSER`.
-- If MinerU task creation or polling fails, verify token validity, upload URL accessibility, and source PDF size.
-- If LLM translation fails, verify the base URL ends before `/v1`, the API key is valid, and the selected model supports chat completions.
-- If formulas or images are broken, rerun with `--keep-temp --keep-markdown`, inspect the MinerU `full.md`, and compare image relative paths.
-- If output already exists, use `--force` to rebuild.
+- **DeepSeek V4 Pro**（`deepseek-chat`，`api.deepseek.com`）
+- **OpenAI**（`gpt-4o-mini`、`gpt-4o` 等，`api.openai.com`）
+- 任何兼容 `/v1/chat/completions` 的服务（Ollama、vLLM 等）
 
-For detailed fixes, read `references/troubleshooting.md`.
+切换模型只需修改 `PDF_TRANSLATE_MODEL` 和 `PDF_TRANSLATE_LLM_BASE_URL`。
+
+## 故障排查规则
+
+- 如果 `--check` 报告缺少浏览器，帮助用户安装 Edge/Chrome/Chromium 或设置 `PDF_TRANSLATE_BROWSER`。
+- 如果 MinerU 任务创建或轮询失败，验证 token 有效性、上传 URL 可访问性和源 PDF 大小。
+- 如果 LLM 翻译失败，验证 base URL 末尾不含 `/v1`（脚本自动拼接）、API key 有效、所选模型支持 chat completions。
+- 如果公式或图片损坏，使用 `--keep-temp --keep-markdown` 重新运行，检查 MinerU `full.md` 并对比图片相对路径。
+- 如果输出已存在，使用 `--force` 重新生成。
+- 凭据查找失败时，检查是否在技能目录（`~/.claude/skills/mineru-pdf-vscode/`）下放置了 `.env` 文件。
+
+详细修复方案见 `references/troubleshooting.md`。
