@@ -192,6 +192,19 @@ def import_markdown(auto_install: bool):
         return markdown_module
 
 
+def import_docx(auto_install: bool):
+    try:
+        import docx  # type: ignore
+        return docx
+    except ImportError:
+        if not auto_install:
+            raise PipelineError("Python package `python-docx` is missing. Install it with: python -m pip install python-docx")
+        log("Python package `python-docx` not found; installing it now...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "python-docx"], check=True)
+        import docx  # type: ignore
+        return docx
+
+
 def json_request(method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict | None = None, timeout: int = 120) -> dict:
     body = None
     final_headers = dict(headers or {})
@@ -563,6 +576,154 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
             html_path.unlink()
 
 
+def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx: Path, title: str) -> None:
+    from docx.shared import Inches, Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = docx_module.Document()
+
+    style = doc.styles["Normal"]
+    font = style.font
+    font.name = "Times New Roman"
+    font.size = Pt(11)
+
+    lines = markdown_text.splitlines()
+    i = 0
+    in_code_block = False
+    code_lines: list[str] = []
+
+    img_re = re.compile(r"!\[([^\]]*)\]\(([^\)]+)\)")
+    bold_re = re.compile(r"\*\*(.+?)\*\*")
+    italic_re = re.compile(r"\*(.+?)\*")
+    inline_code_re = re.compile(r"`([^`]+)`")
+
+    def add_formatted_paragraph(para, text: str) -> None:
+        """Add runs with bold, italic, code formatting to a paragraph."""
+        pos = 0
+        while pos < len(text):
+            bm = bold_re.search(text, pos)
+            im = italic_re.search(text, pos)
+            cm = inline_code_re.search(text, pos)
+
+            earliest = None
+            earliest_type = None
+            for m, t in [(bm, "bold"), (im, "italic"), (cm, "code")]:
+                if m and (earliest is None or m.start() < earliest.start()):
+                    earliest = m
+                    earliest_type = t
+
+            if earliest is None:
+                run = para.add_run(text[pos:])
+                break
+
+            if earliest.start() > pos:
+                para.add_run(text[pos:earliest.start()])
+
+            if earliest_type == "bold":
+                run = para.add_run(earliest.group(1))
+                run.bold = True
+            elif earliest_type == "italic":
+                run = para.add_run(earliest.group(1))
+                run.italic = True
+            elif earliest_type == "code":
+                run = para.add_run(earliest.group(1))
+                run.font.name = "Consolas"
+                run.font.size = Pt(10)
+            pos = earliest.end()
+
+    while i < len(lines):
+        line = lines[i]
+
+        if line.strip().startswith("```"):
+            if in_code_block:
+                code_text = "\n".join(code_lines)
+                para = doc.add_paragraph()
+                run = para.add_run(code_text)
+                run.font.name = "Consolas"
+                run.font.size = Pt(9)
+                code_lines = []
+                in_code_block = False
+            else:
+                in_code_block = True
+            i += 1
+            continue
+
+        if in_code_block:
+            code_lines.append(line)
+            i += 1
+            continue
+
+        stripped = line.strip()
+
+        if not stripped:
+            i += 1
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+)", stripped)
+        if heading_match:
+            level = min(len(heading_match.group(1)), 6)
+            heading = doc.add_heading(heading_match.group(2), level=level)
+            i += 1
+            continue
+
+        table_sep = re.match(r"^\s*\|[\s\-:|]+\|\s*$", stripped)
+        if table_sep:
+            i += 1
+            continue
+
+        if stripped.startswith("|") and stripped.endswith("|") and i + 1 < len(lines):
+            next_line = lines[i + 1].strip()
+            if re.match(r"^\s*\|[\s\-:|]+\|\s*$", next_line):
+                header_cells = [c.strip() for c in stripped.split("|")[1:-1]]
+                i += 2
+                data_rows: list[list[str]] = []
+                while i < len(lines):
+                    row_line = lines[i].strip()
+                    if not (row_line.startswith("|") and row_line.endswith("|")):
+                        break
+                    data_rows.append([c.strip() for c in row_line.split("|")[1:-1]])
+                    i += 1
+                num_cols = len(header_cells)
+                table = doc.add_table(rows=1 + len(data_rows), cols=num_cols, style="Table Grid")
+                for ci, cell_text in enumerate(header_cells):
+                    cell = table.rows[0].cells[ci]
+                    cell.text = ""
+                    run = cell.paragraphs[0].add_run(cell_text)
+                    run.bold = True
+                for ri, row in enumerate(data_rows):
+                    for ci, cell_text in enumerate(row):
+                        if ci < num_cols:
+                            cell = table.rows[ri + 1].cells[ci]
+                            cell.text = ""
+                            cell.paragraphs[0].add_run(cell_text)
+                continue
+
+        img_match = img_re.search(stripped)
+        if img_match:
+            alt_text = img_match.group(1)
+            img_path = asset_base_dir / img_match.group(2)
+            if img_path.exists():
+                try:
+                    doc.add_picture(str(img_path), width=Inches(5.5))
+                    last_para = doc.add_paragraph()
+                    last_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = last_para.add_run(alt_text or "Image")
+                    run.italic = True
+                    run.font.size = Pt(9)
+                except Exception:
+                    para = doc.add_paragraph(f"[Image: {alt_text or img_match.group(2)}]")
+            else:
+                para = doc.add_paragraph(f"[Image missing: {alt_text or img_match.group(2)}]")
+            i += 1
+            continue
+
+        para = doc.add_paragraph()
+        add_formatted_paragraph(para, stripped)
+        i += 1
+
+    doc.save(str(out_docx.resolve()))
+
+
 def process_pdf(
     pdf_path: Path,
     output_dir: Path,
@@ -613,6 +774,12 @@ def process_pdf(
     log(f"  Rendering final PDF: {out_pdf.name}")
     render_pdf(markdown_module, translated_markdown, markdown_path.parent, out_pdf, pdf_path.stem, runtime.browser_path)
 
+    if args.output_docx:
+        out_docx = output_dir / f"{pdf_path.stem}_{args.target_suffix}.docx"
+        log(f"  Rendering Word document: {out_docx.name}")
+        docx_module = import_docx(auto_install=not args.no_auto_install)
+        render_docx(docx_module, translated_markdown, markdown_path.parent, out_docx, pdf_path.stem)
+
     if not args.keep_temp:
         shutil.rmtree(doc_temp, ignore_errors=True)
 
@@ -637,7 +804,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true", help="Rebuild outputs even when translated PDFs already exist.")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary extraction files after completion.")
     parser.add_argument("--keep-markdown", action="store_true", help="Also save translated Markdown next to final PDFs.")
-    parser.add_argument("--no-auto-install", action="store_true", help="Do not auto-install the `markdown` package if missing.")
+    parser.add_argument("--output-docx", action="store_true", dest="output_docx", help="Also output translated Word document (.docx) alongside PDF.")
+    parser.add_argument("--no-auto-install", action="store_true", help="Do not auto-install Python packages if missing.")
     parser.add_argument("--no-strip-headers", action="store_true", dest="no_strip_headers", help="Do not strip repeated headers/footers from MinerU Markdown output.")
     parser.add_argument("--check", action="store_true", help="Check local environment and config without running translation.")
     return parser
