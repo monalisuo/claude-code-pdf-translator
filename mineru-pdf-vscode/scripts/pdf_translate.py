@@ -148,12 +148,12 @@ def detect_browser(explicit_path: str | None, workdir: Path | None = None) -> st
         candidates.append(env_browser)
 
     for executable in [
-        "msedge",
-        "microsoft-edge",
         "google-chrome",
         "chrome",
         "chromium",
         "chromium-browser",
+        "msedge",
+        "microsoft-edge",
     ]:
         found = shutil.which(executable)
         if found:
@@ -161,12 +161,12 @@ def detect_browser(explicit_path: str | None, workdir: Path | None = None) -> st
 
     candidates.extend(
         [
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         ]
     )
 
@@ -532,7 +532,7 @@ def build_html_document(title: str, body_html: str) -> str:
       options: {{ enableMenu: false }}
     }};
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-svg.js"></script>
+  <script src="https://cdn.bootcdn.net/ajax/libs/mathjax/3.2.2/es5/tex-svg.js"></script>
   <style>
     @page {{ margin: 20mm 16mm; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif; line-height: 1.65; color: #111; }}
@@ -556,6 +556,11 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
     html_doc = build_html_document(title, body)
     html_path = asset_base_dir / "_translated_render.html"
     html_path.write_text(html_doc, encoding="utf-8")
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(["pkill", "-f", "msedge|chrome|chromium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         cmd = [
             browser_path,
@@ -563,17 +568,19 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
             "--disable-gpu",
             "--no-sandbox",
             "--run-all-compositor-stages-before-draw",
-            "--virtual-time-budget=15000",
+            "--virtual-time-budget=60000",
             f"--print-to-pdf={out_pdf.resolve()}",
             "--print-to-pdf-no-header",
-            html_path.resolve().as_uri(),
+            str(html_path.resolve()),
         ]
-        result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise PipelineError(f"Browser PDF render failed ({result.returncode}): {detail[:2000]}")
+            raise PipelineError(f"Browser PDF render failed (exit code {result.returncode})")
     finally:
-        if html_path.exists():
+        # Keep HTML for debugging when small PDF
+        if html_path.exists() and out_pdf.exists() and out_pdf.stat().st_size < 500000:
+            log(f"  Small PDF ({out_pdf.stat().st_size} bytes), keeping debug HTML: {html_path}")
+        elif html_path.exists():
             html_path.unlink()
 
 
