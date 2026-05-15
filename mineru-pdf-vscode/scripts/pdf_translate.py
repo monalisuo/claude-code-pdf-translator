@@ -433,9 +433,61 @@ def translate_chunk(chunk: str, llm: LlmConfig, target_language: str, temperatur
     raise PipelineError(f"LLM translation failed: {last_error}")
 
 
-def translate_markdown(markdown_path: Path, llm: LlmConfig, target_language: str, max_chars: int, temperature: float) -> str:
+def strip_headers_footers(markdown_text: str, min_repeat: int = 2, max_line_len: int = 150) -> str:
+    lines = markdown_text.splitlines()
+    freq: dict[str, int] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        freq[stripped] = freq.get(stripped, 0) + 1
+
+    line_blacklist = {k for k, v in freq.items() if v >= min_repeat and len(k) <= max_line_len}
+
+    header_pattern = re.compile(
+        r"^\s*\d{1,4}\s*$"
+        r"|^\s*[ivxlcdm]{1,6}\s*$"
+        r"|^\s*https?://doi\.org/"
+        r"|^\s*DOI:\s*"
+        r"|^\s*(©|\(?[cC]\)?\s*)?(20\d{2}|19\d{2})\b"
+        r"|^\s*ISSN[\s:]\d{4}-\d{4}"
+        r"|^\s*ISBN[\s:]\d"
+        r"|^\s*(Received|Accepted|Published)[\s:].*\b(20\d{2}|19\d{2})\b"
+        r"|^\s*Vol(ume)?\.?\s*\d+"
+        r"|^\s*(No\.|Number|Issue)\s*\d+"
+        r"|^\s*(pp?\.?\s*)?\d{1,4}[-–]\d{1,4}\s*$"
+    )
+
+    filtered: list[str] = []
+    prev_blank = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if prev_blank:
+                continue
+            prev_blank = True
+            filtered.append(line)
+            continue
+        prev_blank = False
+        if stripped in line_blacklist:
+            continue
+        if header_pattern.search(stripped):
+            continue
+        filtered.append(line)
+
+    return "\n".join(filtered).strip() + "\n"
+
+
+def translate_markdown(markdown_path: Path, llm: LlmConfig, target_language: str, max_chars: int, temperature: float, no_strip_headers: bool = False) -> str:
     source = markdown_path.read_text(encoding="utf-8")
-    protected_text, placeholders = protect_segments(source)
+    if no_strip_headers:
+        filtered_source = source
+    else:
+        filtered_source = strip_headers_footers(source)
+        removed = len(source.splitlines()) - len(filtered_source.splitlines())
+        if removed:
+            log(f"  Stripped {removed} header/footer lines")
+    protected_text, placeholders = protect_segments(filtered_source)
     chunks = split_text(protected_text, max_chars=max_chars)
     translated_chunks: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
@@ -550,6 +602,7 @@ def process_pdf(
         args.target_language,
         max_chars=args.max_chars,
         temperature=args.temperature,
+        no_strip_headers=args.no_strip_headers,
     )
 
     if args.keep_markdown:
@@ -585,6 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary extraction files after completion.")
     parser.add_argument("--keep-markdown", action="store_true", help="Also save translated Markdown next to final PDFs.")
     parser.add_argument("--no-auto-install", action="store_true", help="Do not auto-install the `markdown` package if missing.")
+    parser.add_argument("--no-strip-headers", action="store_true", dest="no_strip_headers", help="Do not strip repeated headers/footers from MinerU Markdown output.")
     parser.add_argument("--check", action="store_true", help="Check local environment and config without running translation.")
     return parser
 
