@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import html.parser
 import json
 import os
 import re
@@ -576,6 +577,64 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
             html_path.unlink()
 
 
+class _HtmlTableParser(html.parser.HTMLParser):
+    """Pull <tr>/<td> rows out of a <table> fragment."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] = []
+        self._current_cell: str = ""
+        self._in_td = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._current_row = []
+        elif tag in ("td", "th"):
+            self._in_td = True
+            self._current_cell = ""
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th"):
+            self._in_td = False
+            self._current_row.append(self._current_cell.strip())
+        elif tag == "tr":
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._current_row = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_td:
+            self._current_cell += data
+
+
+def _parse_html_table(html_fragment: str) -> list[list[str]]:
+    parser = _HtmlTableParser()
+    parser.feed(html_fragment)
+    parser.close()
+    return parser.rows
+
+
+def _add_docx_table(doc, rows: list[list[str]], bold_first: bool = True) -> None:
+    """Add a python-docx table from [row[cell]] data."""
+    if not rows:
+        return
+    num_cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=num_cols, style="Table Grid")
+    for ri, row in enumerate(rows):
+        for ci, cell_text in enumerate(row):
+            if ci >= num_cols:
+                break
+            cell = table.rows[ri].cells[ci]
+            cell.text = ""
+            run = cell.paragraphs[0].add_run(cell_text)
+            if bold_first and ri == 0:
+                run.bold = True
+
+
+TABLE_RE = re.compile(r"<table[\s>][\s\S]*?</table>", re.IGNORECASE)
+
+
 def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx: Path, title: str) -> None:
     from docx.shared import Inches, Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -587,18 +646,12 @@ def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx:
     font.name = "Times New Roman"
     font.size = Pt(11)
 
-    lines = markdown_text.splitlines()
-    i = 0
-    in_code_block = False
-    code_lines: list[str] = []
-
     img_re = re.compile(r"!\[([^\]]*)\]\(([^\)]+)\)")
     bold_re = re.compile(r"\*\*(.+?)\*\*")
     italic_re = re.compile(r"\*(.+?)\*")
     inline_code_re = re.compile(r"`([^`]+)`")
 
     def add_formatted_paragraph(para, text: str) -> None:
-        """Add runs with bold, italic, code formatting to a paragraph."""
         pos = 0
         while pos < len(text):
             bm = bold_re.search(text, pos)
@@ -615,10 +668,8 @@ def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx:
             if earliest is None:
                 run = para.add_run(text[pos:])
                 break
-
             if earliest.start() > pos:
                 para.add_run(text[pos:earliest.start()])
-
             if earliest_type == "bold":
                 run = para.add_run(earliest.group(1))
                 run.bold = True
@@ -631,95 +682,94 @@ def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx:
                 run.font.size = Pt(10)
             pos = earliest.end()
 
-    while i < len(lines):
-        line = lines[i]
+    def process_markdown_lines(text: str) -> None:
+        lines = text.splitlines()
+        i = 0
+        in_code_block = False
+        code_lines: list[str] = []
 
-        if line.strip().startswith("```"):
-            if in_code_block:
-                code_text = "\n".join(code_lines)
-                para = doc.add_paragraph()
-                run = para.add_run(code_text)
-                run.font.name = "Consolas"
-                run.font.size = Pt(9)
-                code_lines = []
-                in_code_block = False
-            else:
-                in_code_block = True
-            i += 1
-            continue
+        while i < len(lines):
+            line = lines[i]
 
-        if in_code_block:
-            code_lines.append(line)
-            i += 1
-            continue
-
-        stripped = line.strip()
-
-        if not stripped:
-            i += 1
-            continue
-
-        heading_match = re.match(r"^(#{1,6})\s+(.+)", stripped)
-        if heading_match:
-            level = min(len(heading_match.group(1)), 6)
-            heading = doc.add_heading(heading_match.group(2), level=level)
-            i += 1
-            continue
-
-        table_sep = re.match(r"^\s*\|[\s\-:|]+\|\s*$", stripped)
-        if table_sep:
-            i += 1
-            continue
-
-        if stripped.startswith("|") and stripped.endswith("|") and i + 1 < len(lines):
-            next_line = lines[i + 1].strip()
-            if re.match(r"^\s*\|[\s\-:|]+\|\s*$", next_line):
-                header_cells = [c.strip() for c in stripped.split("|")[1:-1]]
-                i += 2
-                data_rows: list[list[str]] = []
-                while i < len(lines):
-                    row_line = lines[i].strip()
-                    if not (row_line.startswith("|") and row_line.endswith("|")):
-                        break
-                    data_rows.append([c.strip() for c in row_line.split("|")[1:-1]])
-                    i += 1
-                num_cols = len(header_cells)
-                table = doc.add_table(rows=1 + len(data_rows), cols=num_cols, style="Table Grid")
-                for ci, cell_text in enumerate(header_cells):
-                    cell = table.rows[0].cells[ci]
-                    cell.text = ""
-                    run = cell.paragraphs[0].add_run(cell_text)
-                    run.bold = True
-                for ri, row in enumerate(data_rows):
-                    for ci, cell_text in enumerate(row):
-                        if ci < num_cols:
-                            cell = table.rows[ri + 1].cells[ci]
-                            cell.text = ""
-                            cell.paragraphs[0].add_run(cell_text)
+            if line.strip().startswith("```"):
+                if in_code_block:
+                    code_text = "\n".join(code_lines)
+                    para = doc.add_paragraph()
+                    run = para.add_run(code_text)
+                    run.font.name = "Consolas"
+                    run.font.size = Pt(9)
+                    code_lines = []
+                    in_code_block = False
+                else:
+                    in_code_block = True
+                i += 1
                 continue
 
-        img_match = img_re.search(stripped)
-        if img_match:
-            alt_text = img_match.group(1)
-            img_path = asset_base_dir / img_match.group(2)
-            if img_path.exists():
-                try:
-                    doc.add_picture(str(img_path), width=Inches(5.5))
-                    last_para = doc.add_paragraph()
-                    last_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run = last_para.add_run(alt_text or "Image")
-                    run.italic = True
-                    run.font.size = Pt(9)
-                except Exception:
-                    para = doc.add_paragraph(f"[Image: {alt_text or img_match.group(2)}]")
-            else:
-                para = doc.add_paragraph(f"[Image missing: {alt_text or img_match.group(2)}]")
-            i += 1
-            continue
+            if in_code_block:
+                code_lines.append(line)
+                i += 1
+                continue
 
-        para = doc.add_paragraph()
-        add_formatted_paragraph(para, stripped)
-        i += 1
+            stripped = line.strip()
+
+            if not stripped:
+                i += 1
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.+)", stripped)
+            if heading_match:
+                level = min(len(heading_match.group(1)), 6)
+                doc.add_heading(heading_match.group(2), level=level)
+                i += 1
+                continue
+
+            if stripped.startswith("|") and stripped.endswith("|") and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if re.match(r"^\s*\|[\s\-:|]+\|\s*$", next_line):
+                    header_cells = [c.strip() for c in stripped.split("|")[1:-1]]
+                    i += 2
+                    data_rows: list[list[str]] = []
+                    while i < len(lines):
+                        row_line = lines[i].strip()
+                        if not (row_line.startswith("|") and row_line.endswith("|")):
+                            break
+                        data_rows.append([c.strip() for c in row_line.split("|")[1:-1]])
+                        i += 1
+                    _add_docx_table(doc, [header_cells] + data_rows)
+                    continue
+
+            img_match = img_re.search(stripped)
+            if img_match:
+                alt_text = img_match.group(1)
+                img_path = asset_base_dir / img_match.group(2)
+                if img_path.exists():
+                    try:
+                        doc.add_picture(str(img_path), width=Inches(5.5))
+                        last_para = doc.add_paragraph()
+                        last_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run = last_para.add_run(alt_text or "Image")
+                        run.italic = True
+                        run.font.size = Pt(9)
+                    except Exception:
+                        doc.add_paragraph(f"[Image: {alt_text or img_match.group(2)}]")
+                else:
+                    doc.add_paragraph(f"[Image missing: {alt_text or img_match.group(2)}]")
+                i += 1
+                continue
+
+            para = doc.add_paragraph()
+            add_formatted_paragraph(para, stripped)
+            i += 1
+
+    # Split markdown by HTML table blocks and interleave
+    parts = TABLE_RE.split(markdown_text)
+    tables = TABLE_RE.findall(markdown_text)
+
+    for idx, part in enumerate(parts):
+        process_markdown_lines(part)
+        if idx < len(tables):
+            rows = _parse_html_table(tables[idx])
+            _add_docx_table(doc, rows)
 
     doc.save(str(out_docx.resolve()))
 
