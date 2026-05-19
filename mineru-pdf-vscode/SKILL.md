@@ -7,7 +7,7 @@ description: 使用 MinerU 在线提取、OpenAI 兼容大模型（DeepSeek、Op
 
 使用此技能帮助用户将本地 PDF 论文或技术文档翻译为排版完整的译文 PDF，尽可能保留原文结构、图片、表格、公式和 Markdown 排版。
 
-核心实现为 `scripts/pdf_translate.py`。它将源 PDF 发送至上传服务、MinerU 和所配置的 LLM，然后使用 Edge/Chrome/Chromium 无头浏览器在本地渲染最终 PDF。这是外部数据处理流程：处理敏感 PDF 前，请确保用户了解文档会离开本地机器。
+核心实现为 `scripts/pdf_translate.py`。它将源 PDF 直传 MinerU 批量 API 进行版面解析，再通过所配置的 LLM 翻译，最后使用 Chrome/Edge/Chromium 无头浏览器在本地渲染最终 PDF（同时可选输出 DOCX）。这是外部数据处理流程：处理敏感 PDF 前，请确保用户了解文档会离开本地机器。
 
 ## 标准流程
 
@@ -23,6 +23,31 @@ description: 使用 MinerU 在线提取、OpenAI 兼容大模型（DeepSeek、Op
    ```
 5. 检查 `translated/` 输出目录。如果存在 `translated/failures.json`，读取并解释失败原因和修复方案。
 6. 返回最终输出路径和简要操作摘要。禁止粘贴 API 密钥、token 或提取的文档全文。
+
+## 管道架构
+
+```
+PDF → MinerU 批量 API（直传 OSS 预签名 URL）→ ZIP 下载 → Markdown 提取
+  → protect_segments（保护公式/代码/图片）→ LLM 分块翻译
+  → restore_segments（还原保护内容）→ Chrome headless 渲染 → 译文 PDF (+ 可选 DOCX)
+```
+
+### 上传方式
+
+PDF 直接上传至 MinerU 批量 API（`/api/v4/file-urls/batch`），通过 OSS 预签名 PUT URL 传输，不再依赖第三方上传中转服务。`--upload-api-url` 保留但默认流程已绕过。
+
+### 公式保护
+
+翻译前自动将以下内容替换为占位符，防止 LLM 破坏：
+- 围栏代码块 ` ``` ` 
+- Markdown 图片 `![]()`
+- 行内代码 `` ` `` 
+- 显示公式 `$$...$$`、`\[...\]`、`\(...\)`
+- 行内公式 `$...$`（排除货币金额如 $50）
+
+### 浏览器渲染
+
+PDF 渲染严格按 Chrome → Edge → Chromium 优先级搜索可执行文件，因为 Edge headless 在处理复杂 HTML 时存在静默失败 bug（退出码 0 但不生成输出文件）。渲染前会在 Windows 上自动杀掉残留的 chrome/msedge 进程，stderr 重定向至 `DEVNULL` 以避免 Edge 二进制输出导致的 Unicode 解码错误。
 
 ## 配置
 
@@ -95,6 +120,18 @@ OCR 模式处理扫描件：
 python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --ocr
 ```
 
+同时生成 Word 文档：
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --output-docx
+```
+
+保留页眉页脚（默认自动过滤重复页眉页脚）：
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" --workdir . --no-strip-headers
+```
+
 仅在用户明确要求时使用命令行传递凭据，避免在终端输出中回显密钥：
 
 ```bash
@@ -134,10 +171,11 @@ python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" \
 
 ## 故障排查规则
 
-- 如果 `--check` 报告缺少浏览器，帮助用户安装 Edge/Chrome/Chromium 或设置 `PDF_TRANSLATE_BROWSER`。
-- 如果 MinerU 任务创建或轮询失败，验证 token 有效性、上传 URL 可访问性和源 PDF 大小。
+- 如果 `--check` 报告缺少浏览器，帮助用户安装 Chrome/Edge/Chromium 或设置 `PDF_TRANSLATE_BROWSER`。推荐 Chrome（Edge headless 在处理复杂 HTML 时可能静默失败）。
+- 如果 MinerU 任务创建或轮询失败，验证 token 有效性。默认直传 MinerU 批量 API，无需依赖第三方上传服务。
 - 如果 LLM 翻译失败，验证 base URL 末尾不含 `/v1`（脚本自动拼接）、API key 有效、所选模型支持 chat completions。
-- 如果公式或图片损坏，使用 `--keep-temp --keep-markdown` 重新运行，检查 MinerU `full.md` 并对比图片相对路径。
+- 如果公式或图片损坏，使用 `--keep-temp --keep-markdown` 重新运行，检查 MinerU `full.md` 并对比图片相对路径。检查 `$...$` 行内公式和 `$$...$$` 显示公式是否被 LLM 破坏。
+- 如果 PDF 渲染只输出单页或空白，说明浏览器选择了 Edge headless，安装 Chrome 后重新运行即可。
 - 如果输出已存在，使用 `--force` 重新生成。
 - 凭据查找失败时，检查是否在技能目录（`~/.claude/skills/mineru-pdf-vscode/`）下放置了 `.env` 文件。
 
