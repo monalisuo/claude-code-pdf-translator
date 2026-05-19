@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import html.parser
 import http.client
 import json
 import os
@@ -305,28 +306,29 @@ def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
             rfonts = _sub_element(rpr, "rFonts")
         rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
         rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}eastAsia", "Microsoft YaHei")
+        rfonts.set(f"{{{_W_NS}}}eastAsia", "SimSun")
         rfonts.set(f"{{{_W_NS}}}cs", "Times New Roman")
 
-        # 11 pt
+        # 小四 = 12 pt = 24 half-pts
         for tag in ("sz", "szCs"):
             sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
             if sz_el is None:
                 sz_el = _sub_element(rpr, tag)
-            sz_el.set(f"{{{_W_NS}}}val", "22")
+            sz_el.set(f"{{{_W_NS}}}val", "24")
 
-        # Paragraph spacing: 1.5× line height, 3 pt before/after
+        # Paragraph spacing: 1.5× line height, 0 pt before/after
         ppr = _ensure_child(normal, "pPr")
         spacing = ppr.find(f"{{{_W_NS}}}spacing")
         if spacing is None:
             spacing = _sub_element(ppr, "spacing")
         spacing.set(f"{{{_W_NS}}}line", "360")
         spacing.set(f"{{{_W_NS}}}lineRule", "auto")
-        spacing.set(f"{{{_W_NS}}}before", "60")
-        spacing.set(f"{{{_W_NS}}}after", "60")
+        spacing.set(f"{{{_W_NS}}}before", "0")
+        spacing.set(f"{{{_W_NS}}}after", "0")
 
     # ---- Heading styles ----------------------------------------------------
-    heading_sizes = {"1": "32", "2": "28", "3": "24", "4": "22", "5": "20", "6": "20"}
+    # 黑体, descending from 三号(16pt) → 四号(14pt) → 小四(12pt)
+    heading_sizes = {"1": "32", "2": "28", "3": "28", "4": "24", "5": "24", "6": "24"}
     for lvl, sz in heading_sizes.items():
         heading = _style_by_id(root, f"Heading{lvl}")
         if heading is None:
@@ -337,7 +339,7 @@ def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
             rfonts = _sub_element(rpr, "rFonts")
         rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
         rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}eastAsia", "Microsoft YaHei")
+        rfonts.set(f"{{{_W_NS}}}eastAsia", "SimHei")
         for tag in ("sz", "szCs"):
             sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
             if sz_el is None:
@@ -950,6 +952,137 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
             html_path.unlink()
 
 
+# ---- HTML table → markdown pipe table converter -----------------------------
+# MinerU outputs HTML <table> blocks, which pandoc's markdown reader silently
+# drops (even with +raw_html).  Convert them to pipe tables beforehand.
+
+_HTML_TABLE_RE = re.compile(r"<table[\s>][\s\S]*?</table>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+class _HtmlTableToGrid(html.parser.HTMLParser):
+    """Parse an HTML <table> into a 2-D grid, expanding colspan."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] = []
+        self._current_cell: str = ""
+        self._in_cell = False
+        self._colspan_stack: list[int] = []   # remaining colspan to fill after cell
+        self._cell_accum: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag_lower = tag.lower()
+        if tag_lower == "tr":
+            self._current_row = []
+            self._colspan_stack = []
+        elif tag_lower in ("td", "th"):
+            self._in_cell = True
+            self._current_cell = ""
+            self._cell_accum = []
+            cs = 1
+            for k, v in attrs:
+                if k == "colspan" and v:
+                    try:
+                        cs = int(v)
+                    except ValueError:
+                        cs = 1
+            self._colspan_stack.append(cs)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = tag.lower()
+        if tag_lower in ("td", "th"):
+            self._in_cell = False
+            cell_text = "".join(self._cell_accum).strip()
+            cs = self._colspan_stack.pop(0) if self._colspan_stack else 1
+            for _ in range(cs):
+                self._current_row.append(cell_text)
+        elif tag_lower == "tr":
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._current_row = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell_accum.append(data)
+
+    def error(self, message: str) -> None:
+        pass  # tolerate malformed HTML
+
+
+def _convert_html_tables_to_pipe(markdown_text: str) -> str:
+    """Replace every HTML <table>...</table> with a markdown pipe table."""
+    parts = _HTML_TABLE_RE.split(markdown_text)
+    tables = _HTML_TABLE_RE.findall(markdown_text)
+
+    if not tables:
+        return markdown_text
+
+    result: list[str] = []
+    for idx, part in enumerate(parts):
+        result.append(part)
+        if idx >= len(tables):
+            break
+
+        parser = _HtmlTableToGrid()
+        parser.feed(tables[idx])
+        parser.close()
+        rows = parser.rows
+        if not rows or not any(any(cell for cell in row) for row in rows):
+            result.append("\n")
+            continue
+
+        # Normalise column count
+        col_count = max((len(row) for row in rows), default=1)
+        norm_rows: list[list[str]] = []
+        for row in rows:
+            norm = list(row)
+            while len(norm) < col_count:
+                norm.append("")
+            norm_rows.append(norm[:col_count])
+
+        # If first row is a full-width title (all cells identical), extract it
+        # as a preceding paragraph so it doesn't inflate the pipe table.
+        table_title = ""
+        if norm_rows and col_count >= 2:
+            first = norm_rows[0]
+            if all(c == first[0] for c in first) and first[0]:
+                table_title = first[0]
+                norm_rows.pop(0)
+
+        if not norm_rows:
+            if table_title:
+                result.append(f"\n**{table_title}**\n\n")
+            continue
+
+        # Build pipe table
+        lines: list[str] = []
+        # Header row
+        header = norm_rows[0]
+        lines.append("| " + " | ".join(_clean_cell(h) for h in header) + " |")
+        # Separator
+        lines.append("| " + " | ".join("---" for _ in range(col_count)) + " |")
+        # Data rows
+        for row in norm_rows[1:]:
+            lines.append("| " + " | ".join(_clean_cell(c) for c in row) + " |")
+
+        if table_title:
+            result.append(f"\n**{table_title}**\n" + "\n".join(lines) + "\n\n")
+        else:
+            result.append("\n" + "\n".join(lines) + "\n\n")
+
+    return "".join(result)
+
+
+def _clean_cell(text: str) -> str:
+    """Strip HTML tags and escape pipe characters for markdown table cells."""
+    cleaned = _HTML_TAG_RE.sub("", text)
+    cleaned = cleaned.replace("|", "\\|")
+    cleaned = cleaned.replace("\n", " ")
+    return cleaned
+
+
 def render_docx(markdown_text: str, asset_base_dir: Path, out_docx: Path, title: str, pandoc_path: str, skill_dir: Path, reference_docx: str | None = None) -> None:
     """Convert translated Markdown to DOCX via pandoc, with native OMML formula rendering.
 
@@ -960,6 +1093,11 @@ def render_docx(markdown_text: str, asset_base_dir: Path, out_docx: Path, title:
     if ref is None:
         generated = ensure_reference_docx(pandoc_path, skill_dir)
         ref = str(generated) if generated else None
+
+    # Pre-process: convert HTML tables to markdown pipe tables for pandoc
+    html_table_count = len(_HTML_TABLE_RE.findall(markdown_text))
+    markdown_text = _convert_html_tables_to_pipe(markdown_text)
+    log(f"  DOCX preprocess: {html_table_count} HTML tables → pipe tables")
 
     tmp_md = asset_base_dir / "_translated_docx.md"
     tmp_md.write_text(markdown_text, encoding="utf-8")

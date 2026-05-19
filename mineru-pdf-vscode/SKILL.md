@@ -39,8 +39,8 @@ PDF → MinerU 批量 API（直传 OSS 预签名 URL）→ ZIP 下载 → Markdo
 
 | 元素 | 字体 | 字号 |
 |---|---|---|
-| 正文 (Normal) | Times New Roman + Microsoft YaHei | 11pt |
-| 标题 1-6 | Times New Roman + Microsoft YaHei | 16pt–10pt（逐级递减） |
+| 正文 (Normal) | Times New Roman + 宋体 | 小四 12pt，1.5 倍行距 |
+| 标题 1-6 | Times New Roman + 黑体 | 三号 16pt–小四 12pt |
 | 行内代码 (VerbatimChar) | Consolas | 10pt |
 | 代码块 (SourceCode) | Consolas | 9pt |
 
