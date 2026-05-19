@@ -80,7 +80,39 @@ python scripts/pdf_translate.py --workdir . --keep-temp --keep-markdown --force
 
 ## 公式渲染异常
 
-HTML 渲染器从 jsDelivr 加载 MathJax。如果机器无法访问 CDN，公式可能在打印前无法渲染。请使用可访问 CDN 的网络环境，或修改 `scripts/pdf_translate.py` 中的 HTML 模板，将 MathJax 指向本地文件。
+### PDF 中公式渲染异常
+
+HTML 渲染器通过 jsDelivr CDN 加载 MathJax 3。如果机器无法访问 CDN，公式可能在打印前无法渲染。请使用可访问 CDN 的网络环境，或修改 `scripts/pdf_translate.py` 中的 HTML 模板，将 MathJax 指向本地文件。
+
+### DOCX 中公式显示为原始 LaTeX
+
+确认 Pandoc 已安装且版本足够新（≥ 3.0）：
+
+```bash
+pandoc --version
+```
+
+如果未安装：
+- Windows：`winget install pandoc`
+- macOS：`brew install pandoc`
+- Linux：`sudo apt install pandoc`
+
+Pandoc 会自动将 `$...$` 和 `$$...$$` 转换为 Word 原生 OMML 公式（可双击编辑）。
+
+## DOCX 生成失败
+
+按以下顺序排查：
+
+1. Pandoc 是否已安装（`pandoc --version`）。
+2. 磁盘空间是否充足。
+3. 图片路径是否正确 —— 脚本将临时 markdown 写入 MinerU 提取目录以确保相对路径可解析。
+4. 若 `assets/reference.docx` 损坏，删除后脚本会在下次运行时自动重新生成。
+
+## DOCX 样式不符合预期
+
+脚本首次运行 `--output-docx` 时自动在 `assets/reference.docx` 生成样式模板（正文：Times New Roman + Microsoft YaHei 11pt，代码：Consolas）。用 Word 打开该文件修改样式后保存，后续生成的 DOCX 即使用新样式。
+
+
 
 ## 最终 PDF 被跳过
 

@@ -6,12 +6,12 @@ This implementation is intentionally self-contained for VS Code + Claude Code wo
 - stdlib HTTP client for MinerU, uploads, downloads, and chat completions
 - optional auto-install of the `markdown` package for HTML rendering
 - Edge/Chrome/Chromium headless printing for final PDF output
+- pandoc for DOCX generation with native formula rendering
 """
 from __future__ import annotations
 
 import argparse
 import html
-import html.parser
 import http.client
 import json
 import os
@@ -197,18 +197,190 @@ def import_markdown(auto_install: bool):
         return markdown_module
 
 
-def import_docx(auto_install: bool):
-    try:
-        import docx  # type: ignore
-        return docx
-    except ImportError:
-        if not auto_install:
-            raise PipelineError("Python package `python-docx` is missing. Install it with: python -m pip install python-docx")
-        log("Python package `python-docx` not found; installing it now...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "python-docx"], check=True)
-        import docx  # type: ignore
-        return docx
+PANDOC_INSTALL_HINT = (
+    "Pandoc is required for DOCX output. Install it from https://pandoc.org/installing.html\n"
+    "  Windows: winget install pandoc   or   choco install pandoc\n"
+    "  macOS:   brew install pandoc\n"
+    "  Linux:   sudo apt install pandoc   or   sudo dnf install pandoc"
+)
 
+
+def find_pandoc() -> str | None:
+    """Return the path to a working pandoc executable, or None."""
+    # Common Windows install paths
+    if sys.platform == "win32":
+        for base in [os.environ.get("ProgramFiles", "C:\\Program Files"),
+                     os.environ.get("LOCALAPPDATA", ""),
+                     os.path.expandvars(r"%ProgramFiles%")]:
+            if base:
+                candidate = os.path.join(base, "Pandoc", "pandoc.exe")
+                if os.path.isfile(candidate):
+                    return candidate
+    path = shutil.which("pandoc")
+    return path if path else None
+
+
+def ensure_pandoc(auto_install: bool) -> str:
+    """Find pandoc, or raise PipelineError with install instructions."""
+    pandoc_path = find_pandoc()
+    if pandoc_path:
+        return pandoc_path
+    if auto_install:
+        raise PipelineError(PANDOC_INSTALL_HINT)
+    raise PipelineError("Pandoc not found. Run with --no-auto-install to suppress install hints.")
+
+
+def ensure_reference_docx(pandoc_path: str, skill_dir: Path) -> Path | None:
+    """Return path to a reference.docx with CJK-friendly defaults.
+
+    Uses *skill_dir*/assets/reference.docx if it exists; otherwise generates
+    one from pandoc's default template and patches styles for Chinese readability.
+    Returns None when generation fails (caller falls back to no --reference-doc).
+    """
+    ref_path = skill_dir / "assets" / "reference.docx"
+    if ref_path.exists():
+        return ref_path
+    try:
+        result = subprocess.run(
+            [pandoc_path, "--print-default-data-file", "reference.docx"],
+            capture_output=True, check=True,
+        )
+        _patch_reference_styles(result.stdout, ref_path)
+        log(f"  Generated reference.docx → {ref_path}")
+        return ref_path
+    except Exception as exc:
+        log(f"  Could not generate reference.docx: {exc}")
+        return None
+
+
+# ---- reference.docx style patching -----------------------------------------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _style_by_id(root, style_id: str):
+    for el in root.findall(f"{{{_W_NS}}}style"):
+        if el.get(f"{{{_W_NS}}}styleId") == style_id:
+            return el
+    return None
+
+
+def _sub_element(parent, tag: str):
+    from xml.etree import ElementTree as _ET
+    return _ET.SubElement(parent, f"{{{_W_NS}}}{tag}")
+
+
+def _ensure_child(parent, tag: str):
+    child = parent.find(f"{{{_W_NS}}}{tag}")
+    if child is None:
+        child = _sub_element(parent, tag)
+    return child
+
+
+def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
+    """Adjust Normal / Heading / Code fonts in a pandoc reference docx."""
+    import io as _io
+    from xml.etree import ElementTree as _ET
+
+    _ET.register_namespace("", _W_NS)
+    _ET.register_namespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+
+    with zipfile.ZipFile(_io.BytesIO(docx_bytes), "r") as zin:
+        files = {name: zin.read(name) for name in zin.namelist()}
+
+    styles_xml = files.get("word/styles.xml")
+    if styles_xml is None:
+        return
+
+    root = _ET.fromstring(styles_xml)
+
+    # ---- Normal style ------------------------------------------------------
+    normal = _style_by_id(root, "Normal")
+    if normal is not None:
+        rpr = _ensure_child(normal, "rPr")
+
+        # Font: Times New Roman (Latin) + Microsoft YaHei (CJK)
+        rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
+        if rfonts is None:
+            rfonts = _sub_element(rpr, "rFonts")
+        rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
+        rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
+        rfonts.set(f"{{{_W_NS}}}eastAsia", "Microsoft YaHei")
+        rfonts.set(f"{{{_W_NS}}}cs", "Times New Roman")
+
+        # 11 pt
+        for tag in ("sz", "szCs"):
+            sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
+            if sz_el is None:
+                sz_el = _sub_element(rpr, tag)
+            sz_el.set(f"{{{_W_NS}}}val", "22")
+
+        # Paragraph spacing: 1.5× line height, 3 pt before/after
+        ppr = _ensure_child(normal, "pPr")
+        spacing = ppr.find(f"{{{_W_NS}}}spacing")
+        if spacing is None:
+            spacing = _sub_element(ppr, "spacing")
+        spacing.set(f"{{{_W_NS}}}line", "360")
+        spacing.set(f"{{{_W_NS}}}lineRule", "auto")
+        spacing.set(f"{{{_W_NS}}}before", "60")
+        spacing.set(f"{{{_W_NS}}}after", "60")
+
+    # ---- Heading styles ----------------------------------------------------
+    heading_sizes = {"1": "32", "2": "28", "3": "24", "4": "22", "5": "20", "6": "20"}
+    for lvl, sz in heading_sizes.items():
+        heading = _style_by_id(root, f"Heading{lvl}")
+        if heading is None:
+            continue
+        rpr = _ensure_child(heading, "rPr")
+        rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
+        if rfonts is None:
+            rfonts = _sub_element(rpr, "rFonts")
+        rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
+        rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
+        rfonts.set(f"{{{_W_NS}}}eastAsia", "Microsoft YaHei")
+        for tag in ("sz", "szCs"):
+            sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
+            if sz_el is None:
+                sz_el = _sub_element(rpr, tag)
+            sz_el.set(f"{{{_W_NS}}}val", sz)
+
+    # ---- Verbatim Char (inline code) ---------------------------------------
+    vc = _style_by_id(root, "VerbatimChar")
+    if vc is not None:
+        rpr = _ensure_child(vc, "rPr")
+        rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
+        if rfonts is None:
+            rfonts = _sub_element(rpr, "rFonts")
+        rfonts.set(f"{{{_W_NS}}}ascii", "Consolas")
+        rfonts.set(f"{{{_W_NS}}}hAnsi", "Consolas")
+        rfonts.set(f"{{{_W_NS}}}cs", "Consolas")
+        for tag in ("sz", "szCs"):
+            sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
+            if sz_el is None:
+                sz_el = _sub_element(rpr, tag)
+            sz_el.set(f"{{{_W_NS}}}val", "20")  # 10 pt
+
+    # ---- Source Code (code blocks) -----------------------------------------
+    sc = _style_by_id(root, "SourceCode")
+    if sc is not None:
+        rpr = _ensure_child(sc, "rPr")
+        rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
+        if rfonts is None:
+            rfonts = _sub_element(rpr, "rFonts")
+        rfonts.set(f"{{{_W_NS}}}ascii", "Consolas")
+        rfonts.set(f"{{{_W_NS}}}hAnsi", "Consolas")
+        rfonts.set(f"{{{_W_NS}}}cs", "Consolas")
+        for tag in ("sz", "szCs"):
+            sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
+            if sz_el is None:
+                sz_el = _sub_element(rpr, tag)
+            sz_el.set(f"{{{_W_NS}}}val", "18")  # 9 pt
+
+    files["word/styles.xml"] = _ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+    with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in files.items():
+            zout.writestr(name, data)
 
 def json_request(method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict | None = None, timeout: int = 120) -> dict:
     body = None
@@ -292,6 +464,7 @@ def mineru_batch_upload(pdf_path: Path, token: str, source_language: str, ocr: b
     batch_payload = {
         "files": [{"name": pdf_path.name}],
         "model_version": "pipeline",
+        "enable_formula": True,
     }
     batch_resp = json_request("POST", MINERU_BATCH_URL, headers=headers, payload=batch_payload)
     if batch_resp.get("code") != 0:
@@ -566,6 +739,124 @@ def strip_headers_footers(markdown_text: str, min_repeat: int = 2, max_line_len:
     return "\n".join(filtered).strip() + "\n"
 
 
+def clean_formulas(markdown_text: str) -> str:
+    """Fix known MinerU formula extraction corruption patterns in markdown."""
+    text = markdown_text
+
+    # ---- Fix 0: Normalize whitespace around math delimiters (preparatory) ----
+    text = re.sub(r"\$\s+(.+?)\s+\$", r"$\1$", text)
+    text = re.sub(r"\$\$\s+(.+?)\s+\$\$", r"$$\1$$", text)
+    text = re.sub(r"\\\[\s+(.+?)\s+\\\]", r"\\[\1\\]", text)
+    text = re.sub(r"\\\(\s+(.+?)\s+\\\)", r"\\(\1\\)", text)
+
+    # ---- Fix 1: Wrap bare LaTeX math environments with $$...$$ ----
+    BARE_ENV_NAMES = (
+        r"array|aligned|align|alignat|gathered|split|cases"
+        r"|matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix"
+    )
+    BARE_ENV_RE = re.compile(
+        r"(?<!\$)(\\begin\{(" + BARE_ENV_NAMES + r")\}[\s\S]*?\\end\{\2\})(?!\$)"
+    )
+    text = BARE_ENV_RE.sub(r"$$\n\1\n$$", text)
+
+    # ---- Fix 2: Unwrap single-cell array environments ----
+    SINGLE_CELL_ARRAY_RE = re.compile(
+        r"\$\$\s*\\begin\{array\}\s*\{\s*([rcl])\s*\}\s*\n?\s*"
+        r"([^\\&]+?)"
+        r"\s*\n?\s*\\end\{array\}\s*\$\$"
+    )
+
+    def _unwrap_array(match: re.Match[str]) -> str:
+        content = match.group(2).strip()
+        if "\\\\" not in content and "&" not in content:
+            return f"$$\n{content}\n$$"
+        return match.group(0)
+
+    text = SINGLE_CELL_ARRAY_RE.sub(_unwrap_array, text)
+
+    # ---- Fix 3: Repair \sum \bigl(...\bigr) subscript errors ----
+    BIG_OPERATORS = (
+        r"\\sum|\\prod|\\coprod|\\bigcup|\\bigcap"
+        r"|\\bigvee|\\bigwedge|\\bigoplus|\\bigotimes"
+        r"|\\biguplus|\\bigsqcup|\\int|\\oint|\\iint|\\iiint"
+    )
+    BIGL_SUBSCRIPT_RE = re.compile(
+        r"(" + BIG_OPERATORS + r")"
+        r"\s*\\bigl\s*([\(\[\{])\s*"
+        r"(.+?)"
+        r"\s*\\bigr\s*([\)\]\}])"
+    )
+    text = BIGL_SUBSCRIPT_RE.sub(r"\1_{\2\3\4}", text)
+
+    BIGL_VBAR_RE = re.compile(
+        r"(" + BIG_OPERATORS + r")"
+        r"\s*\\bigl\s*\|\s*"
+        r"(.+?)"
+        r"\s*\\bigr\s*\|"
+    )
+    text = BIGL_VBAR_RE.sub(r"\1_{|\2|}", text)
+
+    # ---- Fix 4: Remove \cal{X} hallucination ----
+    text = re.sub(r"\\cal\s*\{\s*([A-Za-z])\s*\}", r"\1", text)
+
+    # ---- Fix 5: Remove \stackrel{\cdot}{\in} hallucination ----
+    text = re.sub(
+        r"\\stackrel\s*\{\s*\\cdot\s*\}\s*\{\s*\\in\s*\}",
+        r"\\in",
+        text,
+    )
+
+    # ---- Fix 6: Remove stray dash in subscript ----
+    text = re.sub(
+        r"(\w)\s*_\s*\{\s*-\s*\}\s*(\w[\w\s]*)",
+        r"\1_{\2}",
+        text,
+    )
+    text = re.sub(r"(\w)\s*_\s*\{\s*-\s*\}", r"\1", text)
+
+    # ---- Fix 7: Strip \mathrm{punctuation} artifacts ----
+    text = re.sub(
+        r"\{\s*\\mathrm\s*\{\s*([:;,.!?])\s*\}\s*\}",
+        r"\1",
+        text,
+    )
+    text = re.sub(
+        r"\\mathrm\s*\{\s*([:;,.!?])\s*\}",
+        r"\1",
+        text,
+    )
+
+    # ---- Fix 8: Collapse excessive LaTeX whitespace (applied LAST) ----
+    def _compress_subscript(match: re.Match[str]) -> str:
+        base = match.group(1)
+        content = match.group(2).strip()
+        content = re.sub(r"(\b\w)\s+(?=\w\b)", r"\1", content)
+        return f"{base}_{{{content}}}"
+
+    text = re.sub(
+        r"([a-zA-Z0-9\\])\s*_\s*\{\s*([^}]+?)\s*\}",
+        _compress_subscript,
+        text,
+    )
+
+    def _compress_superscript(match: re.Match[str]) -> str:
+        base = match.group(1)
+        content = match.group(2).strip()
+        content = re.sub(r"(\b\w)\s+(?=\w\b)", r"\1", content)
+        return f"{base}^{{{content}}}"
+
+    text = re.sub(
+        r"([a-zA-Z0-9\\])\s*\^\s*\{\s*([^}]+?)\s*\}",
+        _compress_superscript,
+        text,
+    )
+
+    text = re.sub(r"([a-zA-Z0-9\\])\s*_\s*(\w)", r"\1_{\2}", text)
+    text = re.sub(r"([a-zA-Z0-9\\])\s*\^\s*(\w)", r"\1^{\2}", text)
+
+    return text
+
+
 def translate_markdown(markdown_path: Path, llm: LlmConfig, target_language: str, max_chars: int, temperature: float, no_strip_headers: bool = False) -> str:
     source = markdown_path.read_text(encoding="utf-8")
     if no_strip_headers:
@@ -575,7 +866,8 @@ def translate_markdown(markdown_path: Path, llm: LlmConfig, target_language: str
         removed = len(source.splitlines()) - len(filtered_source.splitlines())
         if removed:
             log(f"  Stripped {removed} header/footer lines")
-    protected_text, placeholders = protect_segments(filtered_source)
+    cleaned_source = clean_formulas(filtered_source)
+    protected_text, placeholders = protect_segments(cleaned_source)
     chunks = split_text(protected_text, max_chars=max_chars)
     translated_chunks: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
@@ -658,201 +950,35 @@ def render_pdf(markdown_module, markdown_text: str, asset_base_dir: Path, out_pd
             html_path.unlink()
 
 
-class _HtmlTableParser(html.parser.HTMLParser):
-    """Pull <tr>/<td> rows out of a <table> fragment."""
+def render_docx(markdown_text: str, asset_base_dir: Path, out_docx: Path, title: str, pandoc_path: str, skill_dir: Path, reference_docx: str | None = None) -> None:
+    """Convert translated Markdown to DOCX via pandoc, with native OMML formula rendering.
 
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[list[str]] = []
-        self._current_row: list[str] = []
-        self._current_cell: str = ""
-        self._in_td = False
+    Automatically generates/uses a reference docx with Times New Roman + Microsoft YaHei
+    fonts (11pt), unless an explicit *reference_docx* path is provided.
+    """
+    ref = reference_docx
+    if ref is None:
+        generated = ensure_reference_docx(pandoc_path, skill_dir)
+        ref = str(generated) if generated else None
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "tr":
-            self._current_row = []
-        elif tag in ("td", "th"):
-            self._in_td = True
-            self._current_cell = ""
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("td", "th"):
-            self._in_td = False
-            self._current_row.append(self._current_cell.strip())
-        elif tag == "tr":
-            if self._current_row:
-                self.rows.append(self._current_row)
-            self._current_row = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_td:
-            self._current_cell += data
-
-
-def _parse_html_table(html_fragment: str) -> list[list[str]]:
-    parser = _HtmlTableParser()
-    parser.feed(html_fragment)
-    parser.close()
-    return parser.rows
-
-
-def _add_docx_table(doc, rows: list[list[str]], bold_first: bool = True) -> None:
-    """Add a python-docx table from [row[cell]] data."""
-    if not rows:
-        return
-    num_cols = max(len(r) for r in rows)
-    table = doc.add_table(rows=len(rows), cols=num_cols, style="Table Grid")
-    for ri, row in enumerate(rows):
-        for ci, cell_text in enumerate(row):
-            if ci >= num_cols:
-                break
-            cell = table.rows[ri].cells[ci]
-            cell.text = ""
-            run = cell.paragraphs[0].add_run(cell_text)
-            if bold_first and ri == 0:
-                run.bold = True
-
-
-TABLE_RE = re.compile(r"<table[\s>][\s\S]*?</table>", re.IGNORECASE)
-
-
-def render_docx(docx_module, markdown_text: str, asset_base_dir: Path, out_docx: Path, title: str) -> None:
-    from docx.shared import Inches, Pt
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-    doc = docx_module.Document()
-
-    style = doc.styles["Normal"]
-    font = style.font
-    font.name = "Times New Roman"
-    font.size = Pt(11)
-
-    img_re = re.compile(r"!\[([^\]]*)\]\(([^\)]+)\)")
-    bold_re = re.compile(r"\*\*(.+?)\*\*")
-    italic_re = re.compile(r"\*(.+?)\*")
-    inline_code_re = re.compile(r"`([^`]+)`")
-
-    def add_formatted_paragraph(para, text: str) -> None:
-        pos = 0
-        while pos < len(text):
-            bm = bold_re.search(text, pos)
-            im = italic_re.search(text, pos)
-            cm = inline_code_re.search(text, pos)
-
-            earliest = None
-            earliest_type = None
-            for m, t in [(bm, "bold"), (im, "italic"), (cm, "code")]:
-                if m and (earliest is None or m.start() < earliest.start()):
-                    earliest = m
-                    earliest_type = t
-
-            if earliest is None:
-                run = para.add_run(text[pos:])
-                break
-            if earliest.start() > pos:
-                para.add_run(text[pos:earliest.start()])
-            if earliest_type == "bold":
-                run = para.add_run(earliest.group(1))
-                run.bold = True
-            elif earliest_type == "italic":
-                run = para.add_run(earliest.group(1))
-                run.italic = True
-            elif earliest_type == "code":
-                run = para.add_run(earliest.group(1))
-                run.font.name = "Consolas"
-                run.font.size = Pt(10)
-            pos = earliest.end()
-
-    def process_markdown_lines(text: str) -> None:
-        lines = text.splitlines()
-        i = 0
-        in_code_block = False
-        code_lines: list[str] = []
-
-        while i < len(lines):
-            line = lines[i]
-
-            if line.strip().startswith("```"):
-                if in_code_block:
-                    code_text = "\n".join(code_lines)
-                    para = doc.add_paragraph()
-                    run = para.add_run(code_text)
-                    run.font.name = "Consolas"
-                    run.font.size = Pt(9)
-                    code_lines = []
-                    in_code_block = False
-                else:
-                    in_code_block = True
-                i += 1
-                continue
-
-            if in_code_block:
-                code_lines.append(line)
-                i += 1
-                continue
-
-            stripped = line.strip()
-
-            if not stripped:
-                i += 1
-                continue
-
-            heading_match = re.match(r"^(#{1,6})\s+(.+)", stripped)
-            if heading_match:
-                level = min(len(heading_match.group(1)), 6)
-                doc.add_heading(heading_match.group(2), level=level)
-                i += 1
-                continue
-
-            if stripped.startswith("|") and stripped.endswith("|") and i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                if re.match(r"^\s*\|[\s\-:|]+\|\s*$", next_line):
-                    header_cells = [c.strip() for c in stripped.split("|")[1:-1]]
-                    i += 2
-                    data_rows: list[list[str]] = []
-                    while i < len(lines):
-                        row_line = lines[i].strip()
-                        if not (row_line.startswith("|") and row_line.endswith("|")):
-                            break
-                        data_rows.append([c.strip() for c in row_line.split("|")[1:-1]])
-                        i += 1
-                    _add_docx_table(doc, [header_cells] + data_rows)
-                    continue
-
-            img_match = img_re.search(stripped)
-            if img_match:
-                alt_text = img_match.group(1)
-                img_path = asset_base_dir / img_match.group(2)
-                if img_path.exists():
-                    try:
-                        doc.add_picture(str(img_path), width=Inches(5.5))
-                        last_para = doc.add_paragraph()
-                        last_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = last_para.add_run(alt_text or "Image")
-                        run.italic = True
-                        run.font.size = Pt(9)
-                    except Exception:
-                        doc.add_paragraph(f"[Image: {alt_text or img_match.group(2)}]")
-                else:
-                    doc.add_paragraph(f"[Image missing: {alt_text or img_match.group(2)}]")
-                i += 1
-                continue
-
-            para = doc.add_paragraph()
-            add_formatted_paragraph(para, stripped)
-            i += 1
-
-    # Split markdown by HTML table blocks and interleave
-    parts = TABLE_RE.split(markdown_text)
-    tables = TABLE_RE.findall(markdown_text)
-
-    for idx, part in enumerate(parts):
-        process_markdown_lines(part)
-        if idx < len(tables):
-            rows = _parse_html_table(tables[idx])
-            _add_docx_table(doc, rows)
-
-    doc.save(str(out_docx.resolve()))
+    tmp_md = asset_base_dir / "_translated_docx.md"
+    tmp_md.write_text(markdown_text, encoding="utf-8")
+    try:
+        cmd = [
+            pandoc_path, str(tmp_md),
+            "--from", "markdown+raw_html+tex_math_dollars",
+            "--to", "docx",
+            "--resource-path", str(asset_base_dir),
+            "--output", str(out_docx.resolve()),
+        ]
+        if ref:
+            cmd.extend(["--reference-doc", ref])
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise PipelineError(f"Pandoc conversion failed (exit {result.returncode}): {result.stderr}")
+    finally:
+        if tmp_md.exists():
+            tmp_md.unlink()
 
 
 def process_pdf(
@@ -901,8 +1027,8 @@ def process_pdf(
     if args.output_docx:
         out_docx = output_dir / f"{pdf_path.stem}_{args.target_suffix}.docx"
         log(f"  Rendering Word document: {out_docx.name}")
-        docx_module = import_docx(auto_install=not args.no_auto_install)
-        render_docx(docx_module, translated_markdown, markdown_path.parent, out_docx, pdf_path.stem)
+        pandoc_path = ensure_pandoc(auto_install=not args.no_auto_install)
+        render_docx(translated_markdown, markdown_path.parent, out_docx, pdf_path.stem, pandoc_path, SKILL_DIR)
 
     if not args.keep_temp:
         shutil.rmtree(doc_temp, ignore_errors=True)
@@ -964,6 +1090,8 @@ def run_check(args: argparse.Namespace) -> int:
         log("python markdown package: ok")
     except Exception:
         log("python markdown package: missing")
+    pandoc_path = find_pandoc()
+    log(f"pandoc: {pandoc_path if pandoc_path else 'missing (required for --output-docx)'}")
     return 0
 
 

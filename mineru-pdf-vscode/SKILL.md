@@ -7,7 +7,7 @@ description: 使用 MinerU 在线提取、OpenAI 兼容大模型（DeepSeek、Op
 
 使用此技能帮助用户将本地 PDF 论文或技术文档翻译为排版完整的译文 PDF，尽可能保留原文结构、图片、表格、公式和 Markdown 排版。
 
-核心实现为 `scripts/pdf_translate.py`。它将源 PDF 直传 MinerU 批量 API 进行版面解析，再通过所配置的 LLM 翻译，最后使用 Chrome/Edge/Chromium 无头浏览器在本地渲染最终 PDF（同时可选输出 DOCX）。这是外部数据处理流程：处理敏感 PDF 前，请确保用户了解文档会离开本地机器。
+核心实现为 `scripts/pdf_translate.py`。它将源 PDF 直传 MinerU 批量 API 进行版面解析，再通过所配置的 LLM 翻译，最后使用 Chrome/Edge/Chromium 无头浏览器在本地渲染最终 PDF（同时可选通过 Pandoc 输出 DOCX，公式自动转为 OMML 可编辑格式）。这是外部数据处理流程：处理敏感 PDF 前，请确保用户了解文档会离开本地机器。
 
 ## 标准流程
 
@@ -29,8 +29,22 @@ description: 使用 MinerU 在线提取、OpenAI 兼容大模型（DeepSeek、Op
 ```
 PDF → MinerU 批量 API（直传 OSS 预签名 URL）→ ZIP 下载 → Markdown 提取
   → protect_segments（保护公式/代码/图片）→ LLM 分块翻译
-  → restore_segments（还原保护内容）→ Chrome headless 渲染 → 译文 PDF (+ 可选 DOCX)
+  → restore_segments（还原保护内容）→ Chrome headless 渲染 → 译文 PDF
+  → （可选）Pandoc → DOCX（公式自动 OMML 渲染）
 ```
+
+### DOCX 样式控制
+
+首次使用 `--output-docx` 时，脚本自动从 Pandoc 默认模板生成 `assets/reference.docx`，并注入以下样式：
+
+| 元素 | 字体 | 字号 |
+|---|---|---|
+| 正文 (Normal) | Times New Roman + Microsoft YaHei | 11pt |
+| 标题 1-6 | Times New Roman + Microsoft YaHei | 16pt–10pt（逐级递减） |
+| 行内代码 (VerbatimChar) | Consolas | 10pt |
+| 代码块 (SourceCode) | Consolas | 9pt |
+
+如需自定义样式，可在 `assets/reference.docx` 上用 Word 直接修改字体、字号、页边距等，脚本检测到已存在文件后会跳过自动生成。
 
 ### 上传方式
 
@@ -175,6 +189,7 @@ python "${CLAUDE_SKILL_DIR}/scripts/pdf_translate.py" \
 - 如果 MinerU 任务创建或轮询失败，验证 token 有效性。默认直传 MinerU 批量 API，无需依赖第三方上传服务。
 - 如果 LLM 翻译失败，验证 base URL 末尾不含 `/v1`（脚本自动拼接）、API key 有效、所选模型支持 chat completions。
 - 如果公式或图片损坏，使用 `--keep-temp --keep-markdown` 重新运行，检查 MinerU `full.md` 并对比图片相对路径。检查 `$...$` 行内公式和 `$$...$$` 显示公式是否被 LLM 破坏。
+- 如果 DOCX 生成失败，检查 Pandoc 是否已安装（`pandoc --version`）。Windows 推荐 `winget install pandoc`，macOS 推荐 `brew install pandoc`。
 - 如果 PDF 渲染只输出单页或空白，说明浏览器选择了 Edge headless，安装 Chrome 后重新运行即可。
 - 如果输出已存在，使用 `--force` 重新生成。
 - 凭据查找失败时，检查是否在技能目录（`~/.claude/skills/mineru-pdf-vscode/`）下放置了 `.env` 文件。
