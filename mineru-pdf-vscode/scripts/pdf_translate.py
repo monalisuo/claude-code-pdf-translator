@@ -361,9 +361,10 @@ def protect_segments(markdown_text: str) -> tuple[str, dict[str, str]]:
         r"```[\s\S]*?```",                  # fenced code blocks
         r"!\[[^\]]*\]\([^\)\n]+\)",       # markdown images
         r"`[^`\n]+`",                        # inline code
-        r"\$\$[\s\S]*?\$\$",               # display math
+        r"\$\$[\s\S]*?\$\$",               # display math $$...$$
         r"\\\[[\s\S]*?\\\]",              # \[ ... \]
         r"\\\([\s\S]*?\\\)",              # \( ... \)
+        r"\$[^\d$][^$]*?\$",              # inline math $...$ (exclude $50)
     ]
     combined = re.compile("|".join(f"({pattern})" for pattern in patterns))
 
