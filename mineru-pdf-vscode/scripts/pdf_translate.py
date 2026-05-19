@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import html
 import html.parser
+import http.client
 import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,8 @@ from typing import Iterable
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
+MINERU_BASE = "https://mineru.net"
+MINERU_BATCH_URL = "https://mineru.net/api/v4/file-urls/batch"
 MINERU_CREATE_TASK_URL = "https://mineru.net/api/v4/extract/task"
 MINERU_TASK_URL_TEMPLATE = "https://mineru.net/api/v4/extract/task/{task_id}"
 DEFAULT_UPLOAD_API_URL = "https://tmpfiles.org/api/v1/upload"
@@ -278,6 +282,75 @@ def multipart_upload_file(pdf_path: Path, upload_api_url: str) -> str:
             "https://tmpfiles.org/", "https://tmpfiles.org/dl/"
         )
     return raw_url
+
+
+def mineru_batch_upload(pdf_path: Path, token: str, source_language: str, ocr: bool) -> str:
+    """Upload PDF directly to MinerU via batch API and return the full_zip_url."""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "source": "claude-code"}
+
+    log("  Requesting MinerU presigned upload URL")
+    batch_payload = {
+        "files": [{"name": pdf_path.name}],
+        "model_version": "pipeline",
+    }
+    batch_resp = json_request("POST", MINERU_BATCH_URL, headers=headers, payload=batch_payload)
+    if batch_resp.get("code") != 0:
+        raise PipelineError(f"Batch upload request failed: {json.dumps(batch_resp, ensure_ascii=False)[:1000]}")
+
+    batch_id = batch_resp.get("data", {}).get("batch_id")
+    file_urls = batch_resp.get("data", {}).get("file_urls", [])
+    if not batch_id or not file_urls:
+        raise PipelineError(f"Batch response missing batch_id/file_urls: {json.dumps(batch_resp, ensure_ascii=False)[:1000]}")
+
+    log("  Uploading PDF to MinerU directly")
+    file_bytes = pdf_path.read_bytes()
+    parsed = urllib.parse.urlparse(file_urls[0])
+    host = parsed.hostname
+    path = parsed.path + ("?" + parsed.query if parsed.query else "")
+    port = parsed.port or 443
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection(host, port, context=ctx, timeout=300)
+    try:
+        conn.putrequest("PUT", path)
+        conn.putheader("User-Agent", "mineru-pdf-vscode/1.0")
+        conn.putheader("Content-Length", str(len(file_bytes)))
+        conn.endheaders()
+        conn.send(file_bytes)
+        resp = conn.getresponse()
+        if resp.status not in (200, 204):
+            body = resp.read().decode("utf-8", errors="replace")
+            raise PipelineError(f"Direct upload failed: HTTP {resp.status}: {body[:1000]}")
+    except (http.client.HTTPException, OSError) as exc:
+        raise PipelineError(f"Direct upload failed: {exc}") from exc
+    finally:
+        conn.close()
+
+    log(f"  MinerU batch id: {batch_id}")
+    log("  Waiting for MinerU to process extraction")
+    batch_poll_url = f"{MINERU_BASE}/api/v4/extract-results/batch/{batch_id}"
+    deadline = time.time() + POLL_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        time.sleep(POLL_INTERVAL_SECONDS)
+        batch_resp = json_request("GET", batch_poll_url, headers=headers, timeout=120)
+        if batch_resp.get("code") != 0:
+            log(f"  Batch poll: code={batch_resp.get('code')}, msg={batch_resp.get('msg', '?')}")
+            continue
+        items = (batch_resp.get("data") or {}).get("extract_result") or []
+        if not items:
+            log("  Batch poll: waiting for results")
+            continue
+        item = items[0]
+        state = item.get("state") or ""
+        if state == "done":
+            zip_url = item.get("full_zip_url")
+            if zip_url:
+                return zip_url
+            raise PipelineError(f"Batch done but no full_zip_url: {item}")
+        if state == "failed":
+            raise PipelineError(f"Batch extraction failed: {item.get('err_msg') or item}")
+        log(f"  Batch state: {state}")
+
+    raise PipelineError(f"Batch polling timed out for batch {batch_id}")
 
 
 def create_mineru_task(file_url: str, token: str, source_language: str, ocr: bool) -> str:
@@ -796,16 +869,9 @@ def process_pdf(
     doc_temp.mkdir(parents=True, exist_ok=True)
 
     log(f"  Uploading {pdf_path.name}")
-    public_pdf_url = multipart_upload_file(pdf_path, args.upload_api_url)
-
-    log("  Creating MinerU extraction task")
-    task_id = create_mineru_task(public_pdf_url, runtime.mineru_token, args.source_language, args.ocr)
-    log(f"  MinerU task id: {task_id}")
-
-    mineru_data = wait_for_mineru(task_id, runtime.mineru_token)
-    zip_url = mineru_data.get("full_zip_url") or mineru_data.get("zip_url")
+    zip_url = mineru_batch_upload(pdf_path, runtime.mineru_token, args.source_language, args.ocr)
     if not zip_url:
-        raise PipelineError(f"MinerU result does not include full_zip_url: {json.dumps(mineru_data, ensure_ascii=False)[:1000]}")
+        raise PipelineError("MinerU batch upload did not return a ZIP URL")
 
     zip_path = doc_temp / "mineru_result.zip"
     log("  Downloading MinerU ZIP result")
