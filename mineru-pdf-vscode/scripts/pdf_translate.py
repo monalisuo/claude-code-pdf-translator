@@ -1067,10 +1067,13 @@ def _convert_html_tables_to_pipe(markdown_text: str) -> str:
         for row in norm_rows[1:]:
             lines.append("| " + " | ".join(_clean_cell(c) for c in row) + " |")
 
+        # Pandoc requires a blank line before a pipe table.  Ensure \n\n
+        # precedes every opening | and separate the optional title.
+        table_block = "\n".join(lines)
         if table_title:
-            result.append(f"\n**{table_title}**\n" + "\n".join(lines) + "\n\n")
+            result.append(f"\n\n**{table_title}**\n\n{table_block}\n\n")
         else:
-            result.append("\n" + "\n".join(lines) + "\n\n")
+            result.append(f"\n\n{table_block}\n\n")
 
     return "".join(result)
 
