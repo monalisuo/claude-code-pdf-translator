@@ -278,6 +278,27 @@ def _ensure_child(parent, tag: str):
     return child
 
 
+def _patch_theme(files: dict[str, bytes]) -> None:
+    """Set majorFont/minorFont East-Asian face so Word doesn't fall back to 等线."""
+    theme_xml = files.get("word/theme/theme1.xml")
+    if theme_xml is None:
+        return
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    from xml.etree import ElementTree as _ET
+    _ET.register_namespace("a", A_NS)
+
+    root = _ET.fromstring(theme_xml)
+    for font_slot, ea_face in [("majorFont", "SimHei"), ("minorFont", "SimSun")]:
+        el = root.find(f"{{{A_NS}}}themeElements/{{{A_NS}}}fontScheme/{{{A_NS}}}{font_slot}")
+        if el is None:
+            continue
+        ea = el.find(f"{{{A_NS}}}ea")
+        if ea is None:
+            ea = _ET.SubElement(el, f"{{{A_NS}}}ea")
+        ea.set("typeface", ea_face)
+    files["word/theme/theme1.xml"] = _ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+
 def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
     """Adjust Normal / Heading / Code fonts in a pandoc reference docx."""
     import io as _io
@@ -289,25 +310,33 @@ def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
     with zipfile.ZipFile(_io.BytesIO(docx_bytes), "r") as zin:
         files = {name: zin.read(name) for name in zin.namelist()}
 
+    # Patch theme fonts so headings don't fall back to 等线
+    _patch_theme(files)
+
     styles_xml = files.get("word/styles.xml")
     if styles_xml is None:
         return
 
     root = _ET.fromstring(styles_xml)
 
+    # Helper: strip theme-referencing attrs so explicit fonts take precedence
+    def _set_fonts(rfonts: _ET.Element, ascii: str, ea: str) -> None:
+        for attr in list(rfonts.attrib):
+            if attr.endswith("Theme") or attr.endswith("theme"):
+                del rfonts.attrib[attr]
+        rfonts.set(f"{{{_W_NS}}}ascii", ascii)
+        rfonts.set(f"{{{_W_NS}}}hAnsi", ascii)
+        rfonts.set(f"{{{_W_NS}}}eastAsia", ea)
+        rfonts.set(f"{{{_W_NS}}}cs", ascii)
+
     # ---- Normal style ------------------------------------------------------
     normal = _style_by_id(root, "Normal")
     if normal is not None:
         rpr = _ensure_child(normal, "rPr")
-
-        # Font: Times New Roman (Latin) + Microsoft YaHei (CJK)
         rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
         if rfonts is None:
             rfonts = _sub_element(rpr, "rFonts")
-        rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}eastAsia", "SimSun")
-        rfonts.set(f"{{{_W_NS}}}cs", "Times New Roman")
+        _set_fonts(rfonts, "Times New Roman", "SimSun")
 
         # 小四 = 12 pt = 24 half-pts
         for tag in ("sz", "szCs"):
@@ -337,14 +366,20 @@ def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
         rfonts = rpr.find(f"{{{_W_NS}}}rFonts")
         if rfonts is None:
             rfonts = _sub_element(rpr, "rFonts")
-        rfonts.set(f"{{{_W_NS}}}ascii", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}hAnsi", "Times New Roman")
-        rfonts.set(f"{{{_W_NS}}}eastAsia", "SimHei")
+        _set_fonts(rfonts, "Times New Roman", "SimHei")
         for tag in ("sz", "szCs"):
             sz_el = rpr.find(f"{{{_W_NS}}}{tag}")
             if sz_el is None:
                 sz_el = _sub_element(rpr, tag)
             sz_el.set(f"{{{_W_NS}}}val", sz)
+
+        # Heading paragraph spacing: 0 pt before/after
+        h_ppr = _ensure_child(heading, "pPr")
+        h_spacing = h_ppr.find(f"{{{_W_NS}}}spacing")
+        if h_spacing is None:
+            h_spacing = _sub_element(h_ppr, "spacing")
+        h_spacing.set(f"{{{_W_NS}}}before", "0")
+        h_spacing.set(f"{{{_W_NS}}}after", "0")
 
     # ---- Verbatim Char (inline code) ---------------------------------------
     vc = _style_by_id(root, "VerbatimChar")
@@ -383,6 +418,100 @@ def _patch_reference_styles(docx_bytes: bytes, out_path: Path) -> None:
     with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zout:
         for name, data in files.items():
             zout.writestr(name, data)
+
+
+def _patch_output_docx(docx_path: Path) -> None:
+    """Post-process a pandoc-generated DOCX to fix fonts and spacing.
+
+    Uses regex rewriting (not XML parsing) to avoid namespace-prefix issues
+    with pandoc's non-standard OOXML output. Strips *Theme attributes so Word
+    respects our explicit font choices, and patches theme East-Asian fonts.
+    """
+    import re as _re
+
+    with zipfile.ZipFile(str(docx_path), "r") as zin:
+        files = {name: zin.read(name) for name in zin.namelist()}
+
+    # ---- patch theme1.xml: set ea font for majorFont / minorFont ------------
+    theme_xml = files.get("word/theme/theme1.xml")
+    if theme_xml is not None:
+        theme_str = theme_xml.decode("utf-8", errors="replace")
+        for slot, face in [("majorFont", "SimHei"), ("minorFont", "SimSun")]:
+            # Find the <a:ea> inside this font slot, or insert one
+            slot_start = theme_str.find(f"<a:{slot}>")
+            if slot_start < 0:
+                continue
+            # Find end of this font slot (next </a:...> at same depth)
+            close_tag = f"</a:{slot}>"
+            slot_end = theme_str.find(close_tag, slot_start)
+            if slot_end < 0:
+                continue
+            block = theme_str[slot_start:slot_end]
+            if "<a:ea" in block:
+                # Patch existing
+                theme_str = _re.sub(
+                    rf"(<a:{slot}>.*?<a:ea\b[^>]*?)typeface=\"[^\"]*\"",
+                    rf"\1typeface=\"{face}\"",
+                    theme_str, count=1, flags=_re.DOTALL,
+                )
+            else:
+                # Insert <a:ea typeface="..."/> before closing tag
+                theme_str = theme_str.replace(
+                    close_tag,
+                    f"<a:ea typeface=\"{face}\"/>{close_tag}",
+                    1,
+                )
+        files["word/theme/theme1.xml"] = theme_str.encode("utf-8")
+
+    # ---- patch styles.xml: strip *Theme attrs, fix heading/Normal spacing ---
+    styles_xml = files.get("word/styles.xml")
+    if styles_xml is not None:
+        styles_str = styles_xml.decode("utf-8", errors="replace")
+
+        # Strip font-theme attrs from <w:rFonts .../> so explicit fonts take effect.
+        # Match only known font theme attribute names — not color theme attrs.
+        styles_str = _re.sub(
+            r'\s+(?:w:)?(?:asciiTheme|hAnsiTheme|eastAsiaTheme|cstheme|bidiTheme)="[^"]*"',
+            "",
+            styles_str,
+        )
+
+        # Fill empty <rFonts /> (theme attrs stripped, no explicit fonts left)
+        # Inheritable from Normal: SimSun.  Headings: SimHei.
+        for heading_id in [f"Heading{i}" for i in range(1, 10)] + ["Title", "Subtitle"]:
+            heading_pat = _re.compile(
+                rf'(<style\b[^>]*styleId="{heading_id}".*?<rFonts)\s*/>',
+                _re.DOTALL,
+            )
+            styles_str = heading_pat.sub(
+                rf'\1 ascii="Times New Roman" hAnsi="Times New Roman" cs="Times New Roman" eastAsia="SimHei"/>',
+                styles_str,
+                count=1,
+            )
+        # Non-heading: fill with SimSun
+        styles_str = _re.sub(
+            r'(<rFonts)\s*/>',
+            r'\1 ascii="Times New Roman" hAnsi="Times New Roman" cs="Times New Roman" eastAsia="SimSun"/>',
+            styles_str,
+        )
+
+        # Fix spacing for all Heading styles, Normal, BodyText, Title
+        for style_id in [f"Heading{i}" for i in range(1, 10)] + ["Normal", "BodyText", "Title"]:
+            styles_str = _re.sub(
+                rf'(<style\b[^>]*styleId="{style_id}".*?<spacing\b)[^>]*/>',
+                rf'\1 after="0" before="0" line="360" lineRule="auto"/>',
+                styles_str,
+                count=1,
+                flags=_re.DOTALL,
+            )
+
+        files["word/styles.xml"] = styles_str.encode("utf-8")
+
+    # Write back
+    with zipfile.ZipFile(str(docx_path), "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in files.items():
+            zout.writestr(name, data)
+
 
 def json_request(method: str, url: str, *, headers: dict[str, str] | None = None, payload: dict | None = None, timeout: int = 120) -> dict:
     body = None
@@ -1130,9 +1259,12 @@ def render_docx(markdown_text: str, asset_base_dir: Path, out_docx: Path, title:
         ]
         if ref:
             cmd.extend(["--reference-doc", ref])
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
-            raise PipelineError(f"Pandoc conversion failed (exit {result.returncode}): {result.stderr}")
+            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            raise PipelineError(f"Pandoc conversion failed (exit {result.returncode}): {stderr}")
+        # Post-process: strip theme font references so Word uses our explicit fonts
+        _patch_output_docx(out_docx)
     finally:
         if tmp_md.exists():
             tmp_md.unlink()
