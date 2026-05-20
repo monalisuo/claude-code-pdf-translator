@@ -1056,15 +1056,31 @@ def _convert_html_tables_to_pipe(markdown_text: str) -> str:
                 result.append(f"\n**{table_title}**\n\n")
             continue
 
+        # ---- Merge continuation rows (MinerU splits cells at PDF line-breaks) ----
+        # A row is a "continuation" when most of its cells are empty — the
+        # non-empty cells complete the content of the row above.
+        header = norm_rows[0]
+        data_rows: list[list[str]] = []
+        for row in norm_rows[1:]:
+            filled = sum(1 for c in row if c)
+            # If this is a sparse row *and* there is a previous row to merge into,
+            # append each non-empty cell to the same column of the previous row.
+            if filled <= col_count // 2 and data_rows:
+                prev = data_rows[-1]
+                for ci in range(col_count):
+                    if row[ci]:
+                        prev[ci] = (prev[ci] + " " + row[ci]).strip()
+            else:
+                data_rows.append(list(row))
+
         # Build pipe table
         lines: list[str] = []
         # Header row
-        header = norm_rows[0]
         lines.append("| " + " | ".join(_clean_cell(h) for h in header) + " |")
         # Separator
         lines.append("| " + " | ".join("---" for _ in range(col_count)) + " |")
-        # Data rows
-        for row in norm_rows[1:]:
+        # Data rows (merged)
+        for row in data_rows:
             lines.append("| " + " | ".join(_clean_cell(c) for c in row) + " |")
 
         # Pandoc requires a blank line before a pipe table.  Ensure \n\n
