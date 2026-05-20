@@ -1140,6 +1140,42 @@ class _HtmlTableToGrid(html.parser.HTMLParser):
         pass  # tolerate malformed HTML
 
 
+def _fix_pipe_table_separators(markdown_text: str) -> str:
+    """Re-insert pipe-table separator rows that the LLM may have dropped during translation.
+
+    Pandoc requires ``|---|---|`` as the second row of every pipe table.
+    Only inserts a separator after the header row (the first row after a
+    non-pipe line), not between data rows.
+    """
+    lines = markdown_text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        out.append(line)
+        # A header row: starts with |, is NOT a separator, and the previous
+        # line was NOT a pipe row (so we know we're at the start of a table).
+        prev_is_pipe = (len(out) >= 2 and out[-2].startswith("|"))
+        if line.startswith("|") and not _PIPE_SEP_RE.match(line.strip()) and not prev_is_pipe:
+            if i + 1 < n:
+                nxt = lines[i + 1]
+                if _PIPE_SEP_RE.match(nxt.strip()):
+                    # Separator already present — keep it
+                    i += 1
+                    out.append(nxt)
+                elif nxt.startswith("|"):
+                    # LLM dropped the separator — insert one
+                    col_count = max(1, len(line.split("|")) - 2)
+                    sep = "| " + " | ".join("---" for _ in range(col_count)) + " |"
+                    out.append(sep)
+        i += 1
+    return "\n".join(out)
+
+
+_PIPE_SEP_RE = re.compile(r"^\|[\s:\-|]*\|$")
+
+
 def _convert_html_tables_to_pipe(markdown_text: str) -> str:
     """Replace every HTML <table>...</table> with a markdown pipe table."""
     parts = _HTML_TABLE_RE.split(markdown_text)
@@ -1186,15 +1222,22 @@ def _convert_html_tables_to_pipe(markdown_text: str) -> str:
             continue
 
         # ---- Merge continuation rows (MinerU splits cells at PDF line-breaks) ----
-        # A row is a "continuation" when most of its cells are empty — the
-        # non-empty cells complete the content of the row above.
+        # Pass 1: sparse rows (≤50% filled).  Pass 2: col-0 looks like a
+        # year "(2023)" or is empty — common in reference tables.  Pass 3: col-0
+        # starts with lowercase — a word fragment continuing the previous row.
         header = norm_rows[0]
         data_rows: list[list[str]] = []
         for row in norm_rows[1:]:
             filled = sum(1 for c in row if c)
-            # If this is a sparse row *and* there is a previous row to merge into,
-            # append each non-empty cell to the same column of the previous row.
-            if filled <= col_count // 2 and data_rows:
+            col0 = row[0].strip() if row and row[0] else ""
+
+            sparse = filled <= col_count // 2
+            empty_col0 = not col0  # continuation row has no first-column value
+            yearish = col0 and bool(re.match(r"^\(?\d{4}[a-z]?\)?$", col0))
+            lowercase_cont = bool(col0) and col0[0].islower()
+            should_merge = (sparse or empty_col0 or yearish or lowercase_cont) and data_rows
+
+            if should_merge:
                 prev = data_rows[-1]
                 for ci in range(col_count):
                     if row[ci]:
@@ -1296,6 +1339,16 @@ def process_pdf(
     safe_extract(zip_path, extract_dir)
     markdown_path = find_markdown_file(extract_dir)
 
+    # Convert HTML tables to pipe tables BEFORE translation so row-merging
+    # heuristics work on the original (English) text — lowercase word fragments
+    # and year patterns are reliable signals that don't survive translation.
+    raw_md = markdown_path.read_text(encoding="utf-8")
+    table_count = len(_HTML_TABLE_RE.findall(raw_md))
+    if table_count:
+        raw_md = _convert_html_tables_to_pipe(raw_md)
+        markdown_path.write_text(raw_md, encoding="utf-8")
+        log(f"  Preprocessed {table_count} HTML tables → pipe tables")
+
     translated_markdown = translate_markdown(
         markdown_path,
         runtime.llm,
@@ -1304,6 +1357,9 @@ def process_pdf(
         temperature=args.temperature,
         no_strip_headers=args.no_strip_headers,
     )
+
+    # LLMs sometimes drop pipe-table separator lines (|---|---|).  Re-insert them.
+    translated_markdown = _fix_pipe_table_separators(translated_markdown)
 
     if args.keep_markdown:
         md_out = output_dir / f"{pdf_path.stem}_{args.target_suffix}.md"
